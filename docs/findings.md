@@ -395,6 +395,60 @@ registration line; std needs no changes (prior art: felipedbene/Haiku-Graviton
   `haiku_devel` requires `haiku==<exact version>`: repack both and install them
   in one transaction.
 
+## Node.js
+
+**Native GCC is ~20x slower than the identical GCC in the container on big C++
+files.** One V8 translation unit: 159 s on the guest, 7.6 s in `haiku-bfs` on
+the same Mac, both GCC 13.3 for `aarch64-unknown-haiku`. Small files are only
+~1.3x slower, and `-E` of the same V8 file takes 0.8 s on the guest, so it is
+the compile itself, not parsing or I/O (QEMU sits at ~600% CPU). Cause not
+found. → `tools/rcc/`: the guest preprocesses, `rcc-server.py` on the host
+compiles the `.ii` in the container, and the object comes back over HTTP
+(159 s → 8.9 s for that file; same `.text` as a local compile). The wrapper is
+called `c++` and sits first in PATH, so ninja's command lines don't change and
+nothing rebuilds. With `-E -MMD` it adds `-MT <object>`, or the depfile names
+the `.ii` as its target.
+
+**CPU time accounting is broken on arm64**: bash's `time` shows user ≈ 0 and
+sys ≈ real for everything, even a pure Python loop. User/sys splits mean nothing.
+
+**The HaikuPorts recipe links system libuv, c-ares, brotli, ICU and
+libexecinfo**, none of which exist for arm64. The bundled copies don't know
+Haiku (`patches/haikuports/nodejs-24.21.0-arm64.patch`):
+- libuv: `undefined reference to uv__process_title_cleanup`. `uv.gyp` has no
+  Haiku branch; add the files libuv's own CMakeLists uses (haiku.c,
+  bsd-ifaddrs.c, no-fsevents.c, no-proctitle.c, posix-hrtime.c, posix-poll.c)
+  and `_BSD_SOURCE`.
+- c-ares: `fatal error: ares_config.h: No such file`. Generated on the guest by
+  c-ares' CMakeLists into `config/haiku/`.
+- zlib (Chromium's fork): `undefined reference to cpu_check_features` when
+  linking `node_mksnapshot`. Add `ARMV8_OS_HAIKU` with CRC32/PMULL left off.
+- no libexecinfo: drop `V8_OS_HAIKU` from V8's `HAVE_EXECINFO_H`, `-lexecinfo`
+  from `v8.gyp`, and add `__HAIKU__` to `src/debug_utils.cc`'s no-execinfo list.
+
+**`os.cpus()` returns `[]`**: the HaikuPorts patchset comments out all of
+`GetCPUInfo` in `src/node_os.cc` (leftover debugging). The original file works.
+
+**The bootstrap `make` defaults `CXX` to the cross compiler's name.** make's
+configure bakes the C++ compiler it saw into the built-in `CXX`, and
+`4.4.1_bootstrap` was cross-built, so every Makefile that relies on the default
+fails with `make: aarch64-unknown-haiku-g++: No such file or directory`
+(node-gyp's link step does). Check with `make -p -f /dev/null | grep '^CXX '`.
+→ `build-make.sh` builds `make-4.4.1_release` with `MAKE_CXX "g++"`.
+
+**`fcntl(F_SETFL)` on `/dev/null` fails with EPERM**, even when setting flags it
+already has. Node's `tools/test.py` does that on fds 0–2 before each test and
+its worker loop swallows the `IOError`, so with stdin from `/dev/null` it runs
+**0 tests and prints "All tests passed"**. Don't redirect stdin for test.py.
+
+**A test that "hangs" with no output** has often crashed: debug_server holds the
+team and waits for a desktop dialog (syslog: `Thread N entered the debugger:
+Segment violation`). `kill -9` the team.
+
+**npm -g**: packagefs is read-only, so the package's builtin
+`lib/node_modules/npm/npmrc` sets `prefix=/boot/system/non-packaged`; global
+installs land in `non-packaged/bin`, which is on PATH.
+
 ## What's missing on arm64
 
 Blocked upstream: **Go** (no haiku/arm64 port),
@@ -402,7 +456,7 @@ Blocked upstream: **Go** (no haiku/arm64 port),
 
 HaikuPorts recipes allow arm64 but nothing has been built yet: autoconf,
 automake, libtool, pkg-config, cmake, meson, ninja, gettext, gcc 15, LLVM 23,
-Ruby, Lua, PHP, Tcl, Node.js 24, plus libs (bzip2, xz, zstd, sqlite, libiconv,
+Ruby, Lua, PHP, Tcl, plus libs (bzip2, xz, zstd, sqlite, libiconv,
 readline). Perl was the main blocker for autotools; it now builds natively.
 
 Vendor CLIs: Homebrew, Claude Code, Codex and the Cursor CLI only ship

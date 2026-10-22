@@ -255,3 +255,37 @@ Rebuild the packages with `build-stack.sh`. Perl is native: on the VM run
 The cross-built libraries from steps 7–8 put their `.pc` files in
 `/boot/system/non-packaged/lib/pkgconfig`, so set
 `PKG_CONFIG_PATH=/boot/system/non-packaged/lib/pkgconfig` to use them.
+
+## 14. Node.js 24
+
+Prebuilt in the pkgman repo (needs steps 11 and 12):
+
+```sh
+ssh haiku 'pkgman install -y nodejs24 make'   # make 4.4.1_release: node-gyp relies on its CXX = g++
+ssh haiku 'node -e "fetch(\"https://nodejs.org/dist/index.json\").then(r => console.log(r.status))"'
+ssh haiku 'npm -g install cowsay && cowsay moo'   # -g installs land in /boot/system/non-packaged
+```
+
+`npm install` with native addons (node-gyp) also needs the bootstrap `gcc`
+from step 6 and `python3.12`. Without our `make`, the addon link fails with
+`make: aarch64-unknown-haiku-g++: No such file or directory` (see findings).
+
+Node has to be built on the guest: `configure`, `mksnapshot` and V8's
+generators run on the target. The guest's own GCC would take ~11 h on V8, so
+`tools/rcc/` sends each preprocessed C++ file to the same GCC 13.3 cross
+compiler in `haiku-bfs` and gets the object back (~35 min in total):
+
+```sh
+# host: compile server (RCC_DIR = host side of a directory haiku-bfs sees as RCC_CDIR)
+RCC_JOBS=12 python3 tools/rcc/rcc-server.py &         # 192.168.64.1:8766
+ssh haiku 'mkdir -p /boot/home/rcc/bin /boot/home/node-build'
+scp tools/rcc/c++ haiku:/boot/home/rcc/bin/
+scp scripts/guest/build-node-native.sh patches/haikuports/nodejs-24.21.0.patchset \
+    patches/haikuports/nodejs-24.21.0-arm64.patch haiku:/boot/home/node-build/
+ssh haiku 'cd /boot/home/node-build && PATH=/boot/home/rcc/bin:$PATH bash build-node-native.sh'
+scp haiku:/boot/home/node-pkgroot.tar out/ && docker cp out/node-pkgroot.tar haiku-bfs:/repo/out/
+docker exec haiku-bfs bash /repo/scripts/container/package-nodejs.sh
+```
+
+The wrapper compiles locally whenever the server can't be reached or a flag
+isn't on its allow-list, so a stopped server only makes the build slow.
