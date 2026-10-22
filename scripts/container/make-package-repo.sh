@@ -80,7 +80,7 @@ cat >> index.html <<EOF
 <pre><code>pkgman add-repo $BASEURL
 pkgman install ncurses6    # first: fixes the bootstrap terminfo path</code></pre>
 <p><code>pkgman</code> needs HTTPS for this, which stock Haiku arm64 lacks: install <code>openssl3</code> and the
-revision-5 <code>haiku</code>/<code>haiku_devel</code> packages from the
+revision-6 <code>haiku</code>/<code>haiku_devel</code> packages from the
 <a href="https://github.com/bluevisor/haiku-arm64-bootstrap/blob/main/docs/guide.md#11-pkgman-over-https">bootstrap release</a> first.
 Per-package notes and sources: <a href="https://github.com/bluevisor/haiku-arm64-packages#readme">README</a>.</p>
 <div class="scroll"><table>

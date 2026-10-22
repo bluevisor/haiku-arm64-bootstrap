@@ -29,6 +29,20 @@ Edit configs with `set cfg to configuration of vm` … `update configuration of 
 **No `qemu-img` on PATH.** UTM bundles it as a framework that exports `main`.
 `scripts/host/qemu-img-shim.c` `dlopen`s it, which gives you the full qemu-img 10.x.
 
+**The VM window goes blank while the guest is fine.** The UTM window shows an
+empty dark panel (not even "Display output is not active") while ssh works,
+an in-guest screenshot shows the desktop, and UTM's `Data/debug.log` shows
+SPICE creating the 1280x800 surface. A guest mode change, resizing the window
+and a VM stop/start don't help: UTM's own renderer is stuck (seen after UTM
+had run for 17 hours). → `shutdown` the guest, quit and reopen UTM, start the VM.
+
+**Scrolling is reversed compared to macOS.** A Mac trackpad reaches the guest
+as the wheel of QEMU's USB tablet/mouse. Haiku only had natural scrolling
+for real touchpads. → `haiku` rev 6 adds **Natural scrolling** for mice and
+tablets (Input preferences, mouse page; on by default):
+`patches/haiku/mouse-natural-scrolling.patch`, `build-haiku-natscroll.sh`.
+The input_server keeps it per device in `~/config/settings/Mouse_settings`.
+
 **Input automation**: `input mouse click (vm) at {x, y}` (guest pixels),
 `input keystroke (vm) text "..."` and `input scan code (vm) codes {...}`
 (PC AT set 1, e.g. Down = `{224,80,224,208}`, Enter = `{28,156}`) all work.
@@ -268,9 +282,9 @@ arm64 libiconv package. CMake's bundled libarchive stops with
 
 **`pkgman update` can undo the local system packages.** The Haiku repo
 (`haiku/master/arm64/current`) is real and moves with the nightlies. Once it
-serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-5`, and an
+serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-6`, and an
 update would install the stock package again, without TLS, PSCI shutdown, the TCP
-fixes or the Chromium fixes.
+fixes, natural scrolling or the Chromium fixes.
 `rchromium` requires `haiku_rchromium_fixes`, so the solver should balk, but
 check the plan before saying yes. To move to a newer hrev, rebuild the system
 packages from it.

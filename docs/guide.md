@@ -196,6 +196,17 @@ scp out/haiku-system/*-5-arm64.hpkg haiku:/boot/home/stage/
 ssh haiku 'cd /boot/home/stage && pkgman install -y ./haiku-*-5-arm64.hpkg ./haiku_devel-*-5-arm64.hpkg && shutdown -r'
 ```
 
+Revision 6 adds a **Natural scrolling** check box to the mouse page of the
+Input preferences, on by default, so a Mac trackpad scrolls the VM the same
+way as macOS (QEMU passes it on as a USB tablet/mouse wheel). It
+replaces input_server, the mouse and tablet add-ons and the Input app:
+
+```sh
+docker exec haiku-bfs bash /repo/scripts/container/build-haiku-natscroll.sh # ~2 min
+scp out/haiku-system/*-6-arm64.hpkg haiku:/boot/home/stage/
+ssh haiku 'cd /boot/home/stage && pkgman install -y ./haiku-*-6-arm64.hpkg ./haiku_devel-*-6-arm64.hpkg && shutdown -r'
+```
+
 ## 12. Extra packages (diff, tar, xz, zstd, zip, nano, cmake, ninja, …)
 
 Prebuilt in the [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages)

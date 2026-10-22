@@ -1,0 +1,549 @@
+diff --git a/headers/private/input/InputServerTypes.h b/headers/private/input/InputServerTypes.h
+index 68163da4..1dc98ce5 100644
+--- a/headers/private/input/InputServerTypes.h
++++ b/headers/private/input/InputServerTypes.h
+@@ -26,6 +26,8 @@
+ #define IS_SET_KEYBOARD_ID 				'Isid'
+ #define IS_GET_CLICK_SPEED 				'Igcs'
+ #define IS_SET_CLICK_SPEED 				'Iscs'
++#define IS_GET_MOUSE_NATURAL_SCROLLING	'Igns'
++#define IS_SET_MOUSE_NATURAL_SCROLLING	'Isns'
+ #define IS_GET_KEY_REPEAT_RATE 			'Igrr'
+ #define IS_SET_KEY_REPEAT_RATE 			'Isrr'
+ #define IS_GET_KEY_MAP					'Igkm'
+@@ -40,6 +42,8 @@
+ #define IS_START_DEVICE					'Istd'
+ #define IS_STOP_DEVICE					'Ispd'
+ #define IS_CONTROL_DEVICES				'Icnd'
++#define IS_NATURAL_SCROLLING_CHANGED	'Incs'
++	// BInputServerDevice::Control() code for pointing devices
+ #define SYSTEM_SHUTTING_DOWN			'SSDn'
+ 
+ #define IS_SAVE_SETTINGS			'Isst'
+diff --git a/headers/private/input/mouse_natural_scrolling.h b/headers/private/input/mouse_natural_scrolling.h
+new file mode 100644
+index 00000000..a6a257e1
+--- /dev/null
++++ b/headers/private/input/mouse_natural_scrolling.h
+@@ -0,0 +1,52 @@
++/*
++ * Copyright 2026, Haiku, Inc. All Rights Reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef _MOUSE_NATURAL_SCROLLING_H
++#define _MOUSE_NATURAL_SCROLLING_H
++
++
++#include <InputServerTypes.h>
++#include <Message.h>
++
++
++// Natural scrolling reverses the wheel of mice and tablets, so the content
++// follows the fingers on a scroll wheel or a host trackpad the way it does
++// on a touchpad (whose own setting is in touchpad_settings.h). The
++// input_server keeps it per device, next to the other mouse settings.
++
++static const bool kDefaultNaturalScrolling = true;
++
++status_t _control_input_server_(BMessage* command, BMessage* reply);
++
++
++static inline status_t
++get_mouse_natural_scrolling(const char* mouseName, bool* naturalScrolling)
++{
++	BMessage command(IS_GET_MOUSE_NATURAL_SCROLLING);
++	BMessage reply;
++	if (mouseName != NULL)
++		command.AddString("mouse_name", mouseName);
++
++	status_t status = _control_input_server_(&command, &reply);
++	if (status != B_OK)
++		return status;
++
++	return reply.FindBool("natural_scrolling", naturalScrolling);
++}
++
++
++static inline status_t
++set_mouse_natural_scrolling(const char* mouseName, bool naturalScrolling)
++{
++	BMessage command(IS_SET_MOUSE_NATURAL_SCROLLING);
++	BMessage reply;
++	if (mouseName != NULL)
++		command.AddString("mouse_name", mouseName);
++	command.AddBool("natural_scrolling", naturalScrolling);
++
++	return _control_input_server_(&command, &reply);
++}
++
++
++#endif	/* _MOUSE_NATURAL_SCROLLING_H */
+diff --git a/src/add-ons/input_server/devices/mouse/MouseInputDevice.cpp b/src/add-ons/input_server/devices/mouse/MouseInputDevice.cpp
+index bb6133df..99a2a868 100644
+--- a/src/add-ons/input_server/devices/mouse/MouseInputDevice.cpp
++++ b/src/add-ons/input_server/devices/mouse/MouseInputDevice.cpp
+@@ -33,6 +33,7 @@
+ 
+ #include <kb_mouse_settings.h>
+ #include <keyboard_mouse_driver.h>
++#include <mouse_natural_scrolling.h>
+ #include <touchpad_settings.h>
+ 
+ #include "movement_maker.h"
+@@ -110,6 +111,7 @@ private:
+ 			input_device_ref	fDeviceRef;
+ 			mouse_settings		fSettings;
+ 			bool				fDeviceRemapsButtons;
++			bool				fNaturalScrolling;
+ 
+ 			thread_id			fThread;
+ 	volatile bool				fActive;
+@@ -138,6 +140,7 @@ MouseDevice::MouseDevice(MouseInputDevice& target, const char* driverPath)
+ 	fPath(driverPath),
+ 	fDevice(-1),
+ 	fDeviceRemapsButtons(false),
++	fNaturalScrolling(kDefaultNaturalScrolling),
+ 	fThread(-1),
+ 	fActive(false),
+ 	fUpdateSettings(false),
+@@ -487,6 +490,13 @@ MouseDevice::_ControlThread()
+ 		}
+ 
+ 		if (movements.wheel_ydelta != 0 || movements.wheel_xdelta != 0) {
++			// touchpads apply their own natural scrolling setting
++			// in TouchpadMovement
++			if (fNaturalScrolling && !fIsTouchpad) {
++				movements.wheel_xdelta = -movements.wheel_xdelta;
++				movements.wheel_ydelta = -movements.wheel_ydelta;
++			}
++
+ 			BMessage* message = new BMessage(B_MOUSE_WHEEL_CHANGED);
+ 			if (message == NULL)
+ 				continue;
+@@ -567,6 +577,12 @@ MouseDevice::_UpdateSettings()
+ 		LOG_ERROR("error when get_mouse_type\n");
+ 	else
+ 		ioctl(fDevice, MS_SET_TYPE, &fSettings.type);
++
++	bool naturalScrolling;
++	if (get_mouse_natural_scrolling(fDeviceRef.name, &naturalScrolling) != B_OK)
++		LOG_ERROR("error when get_mouse_natural_scrolling\n");
++	else
++		fNaturalScrolling = naturalScrolling;
+ }
+ 
+ 
+@@ -778,8 +794,9 @@ MouseInputDevice::Control(const char* name, void* cookie,
+ 	if (command == B_SET_TOUCHPAD_SETTINGS)
+ 		return device->UpdateTouchpadSettings(message);
+ 
+-	if (command >= B_MOUSE_TYPE_CHANGED
+-		&& command <= B_MOUSE_ACCELERATION_CHANGED)
++	if ((command >= B_MOUSE_TYPE_CHANGED
++			&& command <= B_MOUSE_ACCELERATION_CHANGED)
++		|| command == IS_NATURAL_SCROLLING_CHANGED)
+ 		return device->UpdateSettings();
+ 
+ 	return B_BAD_VALUE;
+diff --git a/src/add-ons/input_server/devices/tablet/TabletInputDevice.cpp b/src/add-ons/input_server/devices/tablet/TabletInputDevice.cpp
+index 703a3e85..f3fbf766 100644
+--- a/src/add-ons/input_server/devices/tablet/TabletInputDevice.cpp
++++ b/src/add-ons/input_server/devices/tablet/TabletInputDevice.cpp
+@@ -30,6 +30,7 @@
+ 
+ #include <kb_mouse_settings.h>
+ #include <keyboard_mouse_driver.h>
++#include <mouse_natural_scrolling.h>
+ 
+ 
+ #undef TRACE
+@@ -92,6 +93,7 @@ private:
+ 
+ 			input_device_ref	fDeviceRef;
+ 			mouse_settings		fSettings;
++			bool				fNaturalScrolling;
+ 
+ 			thread_id			fThread;
+ 	volatile bool				fActive;
+@@ -114,6 +116,7 @@ TabletDevice::TabletDevice(TabletInputDevice& target, const char* driverPath)
+ 	fTarget(target),
+ 	fPath(driverPath),
+ 	fDevice(-1),
++	fNaturalScrolling(kDefaultNaturalScrolling),
+ 	fThread(-1),
+ 	fActive(false),
+ 	fUpdateSettings(false)
+@@ -340,6 +343,11 @@ TabletDevice::_ControlThread()
+ 			}
+ 
+ 			if (movements.wheel_ydelta != 0 || movements.wheel_xdelta != 0) {
++				if (fNaturalScrolling) {
++					movements.wheel_xdelta = -movements.wheel_xdelta;
++					movements.wheel_ydelta = -movements.wheel_ydelta;
++				}
++
+ 				BMessage* message = new BMessage(B_MOUSE_WHEEL_CHANGED);
+ 				if (message == NULL)
+ 					continue;
+@@ -388,6 +396,12 @@ TabletDevice::_UpdateSettings()
+ 		LOG_ERR("error when get_click_speed\n");
+ 	else
+ 		ioctl(fDevice, MS_SET_CLICKSPEED, &fSettings.click_speed, sizeof(bigtime_t));
++
++	bool naturalScrolling;
++	if (get_mouse_natural_scrolling(fDeviceRef.name, &naturalScrolling) != B_OK)
++		LOG_ERR("error when get_mouse_natural_scrolling\n");
++	else
++		fNaturalScrolling = naturalScrolling;
+ }
+ 
+ 
+@@ -480,7 +494,8 @@ TabletInputDevice::Control(const char* name, void* cookie,
+ 	if (command == B_NODE_MONITOR)
+ 		return _HandleMonitor(message);
+ 
+-	if (command == B_CLICK_SPEED_CHANGED)
++	if (command == B_CLICK_SPEED_CHANGED
++		|| command == IS_NATURAL_SCROLLING_CHANGED)
+ 		return device->UpdateSettings();
+ 
+ 	return B_BAD_VALUE;
+diff --git a/src/preferences/input/InputConstants.h b/src/preferences/input/InputConstants.h
+index a8d857e4..462b72bf 100644
+--- a/src/preferences/input/InputConstants.h
++++ b/src/preferences/input/InputConstants.h
+@@ -21,6 +21,7 @@ const uint32 kMsgCursorSpeed		= 'SLcs';
+ const uint32 kMsgFollowsMouseMode	= 'PUff';
+ const uint32 kMsgMouseFocusMode		= 'PUmf';
+ const uint32 kMsgAcceptFirstClick	= 'PUaf';
++const uint32 kMsgNaturalScrolling	= 'PUns';
+ const uint32 kMsgMouseType		= 'PUmt';
+ const uint32 kMsgMouseMap		= 'PUmm';
+ const uint32 kMsgMouseSpeed		= 'SLms';
+diff --git a/src/preferences/input/InputMouse.cpp b/src/preferences/input/InputMouse.cpp
+index c0996a8d..3083fe3c 100644
+--- a/src/preferences/input/InputMouse.cpp
++++ b/src/preferences/input/InputMouse.cpp
+@@ -141,6 +141,24 @@ InputMouse::MessageReceived(BMessage* message)
+ 			break;
+ 		}
+ 
++		case kMsgNaturalScrolling:
++		{
++			BHandler* handler;
++			if (message->FindPointer(
++					"source", reinterpret_cast<void**>(&handler))
++				== B_OK) {
++				BCheckBox* naturalScrollingBox
++					= dynamic_cast<BCheckBox*>(handler);
++				if (naturalScrollingBox != NULL) {
++					fSettings->SetNaturalScrolling(
++						naturalScrollingBox->Value() == B_CONTROL_ON);
++				}
++				fDefaultsButton->SetEnabled(fSettings->IsDefaultable());
++				fRevertButton->SetEnabled(fSettings->IsRevertable());
++			}
++			break;
++		}
++
+ 		case kMsgDoubleClickSpeed:
+ 		{
+ 			int32 value;
+diff --git a/src/preferences/input/MouseSettings.cpp b/src/preferences/input/MouseSettings.cpp
+index 39260017..f4ceda3d 100644
+--- a/src/preferences/input/MouseSettings.cpp
++++ b/src/preferences/input/MouseSettings.cpp
+@@ -17,6 +17,8 @@
+ 
+ #include <stdio.h>
+ 
++#include <mouse_natural_scrolling.h>
++
+ 
+ MouseSettings::MouseSettings(BString name)
+ 	:
+@@ -29,6 +31,7 @@ MouseSettings::MouseSettings(BString name)
+ 	fOriginalMode = fMode;
+ 	fOriginalFocusFollowsMouseMode = fFocusFollowsMouseMode;
+ 	fOriginalAcceptFirstClick = fAcceptFirstClick;
++	fOriginalNaturalScrolling = fNaturalScrolling;
+ }
+ 
+ 
+@@ -55,6 +58,8 @@ MouseSettings::_RetrieveSettings()
+ 	fMode = mouse_mode();
+ 	fFocusFollowsMouseMode = focus_follows_mouse_mode();
+ 	fAcceptFirstClick = accept_first_click();
++	if (get_mouse_natural_scrolling(fName, &fNaturalScrolling) != B_OK)
++		fNaturalScrolling = kDefaultNaturalScrolling;
+ 
+ 	return B_OK;
+ }
+@@ -71,6 +76,7 @@ MouseSettings::Defaults()
+ 	SetMouseMode(B_NORMAL_MOUSE);
+ 	SetFocusFollowsMouseMode(B_NORMAL_FOCUS_FOLLOWS_MOUSE);
+ 	SetAcceptFirstClick(kDefaultAcceptFirstClick);
++	SetNaturalScrolling(kDefaultNaturalScrolling);
+ 
+ 	mouse_map map;
+ 	for (int i = 0; i < B_MAX_MOUSE_BUTTONS; i++)
+@@ -90,6 +96,7 @@ MouseSettings::IsDefaultable() const
+ 		|| fMode != B_NORMAL_MOUSE
+ 		|| fFocusFollowsMouseMode != B_NORMAL_FOCUS_FOLLOWS_MOUSE
+ 		|| fAcceptFirstClick != kDefaultAcceptFirstClick
++		|| fNaturalScrolling != kDefaultNaturalScrolling
+ 		|| fSettings.map.button[0] != B_PRIMARY_MOUSE_BUTTON
+ 		|| fSettings.map.button[1] != B_SECONDARY_MOUSE_BUTTON
+ 		|| fSettings.map.button[2] != B_TERTIARY_MOUSE_BUTTON
+@@ -110,6 +117,7 @@ MouseSettings::Revert()
+ 	SetMouseMode(fOriginalMode);
+ 	SetFocusFollowsMouseMode(fOriginalFocusFollowsMouseMode);
+ 	SetAcceptFirstClick(fOriginalAcceptFirstClick);
++	SetNaturalScrolling(fOriginalNaturalScrolling);
+ 
+ 	SetMapping(fOriginalSettings.map);
+ }
+@@ -126,6 +134,7 @@ MouseSettings::IsRevertable() const
+ 		|| fMode != fOriginalMode
+ 		|| fFocusFollowsMouseMode != fOriginalFocusFollowsMouseMode
+ 		|| fAcceptFirstClick != fOriginalAcceptFirstClick
++		|| fNaturalScrolling != fOriginalNaturalScrolling
+ 		|| fSettings.map.button[0] != fOriginalSettings.map.button[0]
+ 		|| fSettings.map.button[1] != fOriginalSettings.map.button[1]
+ 		|| fSettings.map.button[2] != fOriginalSettings.map.button[2]
+@@ -228,6 +237,14 @@ MouseSettings::SetAcceptFirstClick(bool accept_first_click)
+ }
+ 
+ 
++void
++MouseSettings::SetNaturalScrolling(bool naturalScrolling)
++{
++	if (set_mouse_natural_scrolling(fName, naturalScrolling) == B_OK)
++		fNaturalScrolling = naturalScrolling;
++}
++
++
+ mouse_settings*
+ MouseSettings::GetSettings()
+ {
+diff --git a/src/preferences/input/MouseSettings.h b/src/preferences/input/MouseSettings.h
+index 36f98ed0..f5205e2c 100644
+--- a/src/preferences/input/MouseSettings.h
++++ b/src/preferences/input/MouseSettings.h
+@@ -59,6 +59,9 @@ public:
+ 		bool AcceptFirstClick() const { return fAcceptFirstClick; }
+ 		void SetAcceptFirstClick(bool accept_first_click);
+ 
++		bool NaturalScrolling() const { return fNaturalScrolling; }
++		void SetNaturalScrolling(bool naturalScrolling);
++
+ 		mouse_settings* GetSettings();
+ 
+ private:
+@@ -71,6 +74,8 @@ private:
+ 		mode_focus_follows_mouse	fOriginalFocusFollowsMouseMode;
+ 		bool						fAcceptFirstClick;
+ 		bool						fOriginalAcceptFirstClick;
++		bool						fNaturalScrolling;
++		bool						fOriginalNaturalScrolling;
+ 
+ 		mouse_settings	fSettings, fOriginalSettings;
+ };
+diff --git a/src/preferences/input/SettingsView.cpp b/src/preferences/input/SettingsView.cpp
+index b9bbc00b..2f365099 100644
+--- a/src/preferences/input/SettingsView.cpp
++++ b/src/preferences/input/SettingsView.cpp
+@@ -95,6 +95,10 @@ SettingsView::SettingsView(MouseSettings& settings)
+ 	fAcceptFirstClickBox = new BCheckBox(
+ 		B_TRANSLATE("Accept first click"), new BMessage(kMsgAcceptFirstClick));
+ 
++	// Add the "Natural scrolling" check box
++	fNaturalScrollingBox = new BCheckBox(
++		B_TRANSLATE("Natural scrolling"), new BMessage(kMsgNaturalScrolling));
++
+ 	// Build the layout
+ 
+ 	// Layout is :
+@@ -140,6 +144,7 @@ SettingsView::SettingsView(MouseSettings& settings)
+ 			.AddGlue()
+ 			.AddGroup(B_VERTICAL, 0)
+ 				.Add(fAcceptFirstClickBox)
++				.Add(fNaturalScrollingBox)
+ 				.End()
+ 			.End();
+ 
+@@ -199,4 +204,7 @@ SettingsView::UpdateFromSettings()
+ 		fSettings.AcceptFirstClick() ? B_CONTROL_ON : B_CONTROL_OFF);
+ 	fAcceptFirstClickBox->SetEnabled(
+ 		fSettings.MouseMode() != B_FOCUS_FOLLOWS_MOUSE);
++
++	fNaturalScrollingBox->SetValue(
++		fSettings.NaturalScrolling() ? B_CONTROL_ON : B_CONTROL_OFF);
+ }
+diff --git a/src/preferences/input/SettingsView.h b/src/preferences/input/SettingsView.h
+index aed0a360..1837c64e 100644
+--- a/src/preferences/input/SettingsView.h
++++ b/src/preferences/input/SettingsView.h
+@@ -47,6 +47,7 @@ class SettingsView : public BBox {
+ 				BSlider*		fClickSpeedSlider;
+ 				BSlider*		fMouseSpeedSlider;
+ 				BSlider*		fAccelerationSlider;
++				BCheckBox*		fNaturalScrollingBox;
+ };
+ 
+ #endif	/* SETTINGS_VIEW_H */
+diff --git a/src/servers/input/InputServer.cpp b/src/servers/input/InputServer.cpp
+index c3108030..31510b53 100644
+--- a/src/servers/input/InputServer.cpp
++++ b/src/servers/input/InputServer.cpp
+@@ -507,6 +507,10 @@ InputServer::MessageReceived(BMessage* message)
+ 		case IS_SET_CLICK_SPEED:
+ 			status = HandleGetSetClickSpeed(message, &reply);
+ 			break;
++		case IS_GET_MOUSE_NATURAL_SCROLLING:
++		case IS_SET_MOUSE_NATURAL_SCROLLING:
++			status = HandleGetSetMouseNaturalScrolling(message, &reply);
++			break;
+ 		case IS_GET_KEY_REPEAT_RATE:
+ 			status = HandleGetSetKeyRepeatRate(message, &reply);
+ 			break;
+@@ -1001,6 +1005,41 @@ InputServer::HandleGetSetClickSpeed(BMessage* message, BMessage* reply)
+ }
+ 
+ 
++status_t
++InputServer::HandleGetSetMouseNaturalScrolling(BMessage* message,
++	BMessage* reply)
++{
++	BString mouseName;
++	message->FindString("mouse_name", &mouseName);
++
++	MouseSettings* settings = _GetSettingsForMouse(mouseName);
++
++	bool naturalScrolling;
++	if (message->FindBool("natural_scrolling", &naturalScrolling) == B_OK) {
++		if (settings == NULL) {
++			BList allSettings;
++			_RunningMiceSettings(allSettings);
++			int count = allSettings.CountItems();
++			for (int i = 0; i < count; i++) {
++				static_cast<MouseSettings*>(allSettings.ItemAt(i))
++					->SetNaturalScrolling(naturalScrolling);
++			}
++		} else {
++			settings->SetNaturalScrolling(naturalScrolling);
++		}
++
++		be_app_messenger.SendMessage(IS_SAVE_SETTINGS);
++
++		return _PostMouseControlMessage(IS_NATURAL_SCROLLING_CHANGED,
++			mouseName);
++	}
++
++	if (settings == NULL)
++		settings = _RunningMouseSettings();
++	return reply->AddBool("natural_scrolling", settings->NaturalScrolling());
++}
++
++
+ status_t
+ InputServer::HandleSetMousePosition(BMessage* message, BMessage* reply)
+ {
+diff --git a/src/servers/input/InputServer.h b/src/servers/input/InputServer.h
+index 705cd898..bdc485b9 100644
+--- a/src/servers/input/InputServer.h
++++ b/src/servers/input/InputServer.h
+@@ -142,6 +142,8 @@ class InputServer : public BApplication {
+ 		status_t HandleGetSetMouseMap(BMessage* message, BMessage* reply);
+ 		status_t HandleGetSetKeyboardID(BMessage* message, BMessage* reply);
+ 		status_t HandleGetSetClickSpeed(BMessage* message, BMessage* reply);
++		status_t HandleGetSetMouseNaturalScrolling(BMessage* message,
++			BMessage* reply);
+ 		status_t HandleGetSetKeyRepeatRate(BMessage* message, BMessage* reply);
+ 		status_t HandleGetSetKeyMap(BMessage* message, BMessage* reply);
+ 		status_t HandleFocusUnfocusIMAwareView(BMessage* message, BMessage* reply);
+diff --git a/src/servers/input/MouseSettings.cpp b/src/servers/input/MouseSettings.cpp
+index d37f9b37..cf5107e3 100644
+--- a/src/servers/input/MouseSettings.cpp
++++ b/src/servers/input/MouseSettings.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include "MouseSettings.h"
+ 
++#include <mouse_natural_scrolling.h>
++
+ #include <stdio.h>
+ 
+ #include <FindDirectory.h>
+@@ -100,6 +102,8 @@ MouseSettings::Dump()
+ 	printf("focus follows mouse mode:\t%s\n", focus_follows_mouse_mode);
+ 	printf("accept first click:\t%s\n", fAcceptFirstClick
+ 		? "enabled" : "disabled");
++	printf("natural scrolling:\t%s\n", fNaturalScrolling
++		? "enabled" : "disabled");
+ }
+ #endif
+ 
+@@ -117,6 +121,7 @@ MouseSettings::Defaults()
+ 	SetMouseMode(B_NORMAL_MOUSE);
+ 	SetFocusFollowsMouseMode(B_NORMAL_FOCUS_FOLLOWS_MOUSE);
+ 	SetAcceptFirstClick(kDefaultAcceptFirstClick);
++	SetNaturalScrolling(kDefaultNaturalScrolling);
+ 
+ 	for (int i = 0; i < B_MAX_MOUSE_BUTTONS; i++)
+ 		fSettings.map.button[i] = B_MOUSE_BUTTON(i + 1);
+@@ -234,6 +239,13 @@ MouseSettings::SetAcceptFirstClick(bool acceptFirstClick)
+ }
+ 
+ 
++void
++MouseSettings::SetNaturalScrolling(bool naturalScrolling)
++{
++	fNaturalScrolling = naturalScrolling;
++}
++
++
+ /* MultiMouseSettings functions */
+ 
+ MultipleMouseSettings::MultipleMouseSettings()
+@@ -295,6 +307,10 @@ MultipleMouseSettings::RetrieveSettings()
+ 			message.FindData("mouseSettings", B_ANY_TYPE, i,
+ 				(const void**)&settings, &size);
+ 			MouseSettings* mouseSettings = new MouseSettings(settings);
++			// absent from settings files written before the option existed
++			bool naturalScrolling;
++			if (message.FindBool("naturalScrolling", i, &naturalScrolling) == B_OK)
++				mouseSettings->SetNaturalScrolling(naturalScrolling);
+ 			fMouseSettingsObject.insert(std::pair<BString, MouseSettings*>
+ 				(deviceName, mouseSettings));
+ 			i++;
+@@ -312,6 +328,7 @@ MultipleMouseSettings::Archive(BMessage* into, bool deep) const
+ 		into->AddString("mouseDevice", itr->first);
+ 		into->AddData("mouseSettings", B_ANY_TYPE, itr->second->GetSettings(),
+ 			sizeof(*(itr->second->GetSettings())));
++		into->AddBool("naturalScrolling", itr->second->NaturalScrolling());
+ 	}
+ 
+ 	return B_OK;
+diff --git a/src/servers/input/MouseSettings.h b/src/servers/input/MouseSettings.h
+index cbeffdf2..336d7133 100644
+--- a/src/servers/input/MouseSettings.h
++++ b/src/servers/input/MouseSettings.h
+@@ -65,6 +65,9 @@ class MouseSettings {
+ 		bool AcceptFirstClick() const { return fAcceptFirstClick; }
+ 		void SetAcceptFirstClick(bool acceptFirstClick);
+ 
++		bool NaturalScrolling() const { return fNaturalScrolling; }
++		void SetNaturalScrolling(bool naturalScrolling);
++
+ 		const mouse_settings* GetSettings() { return &fSettings; }
+ 
+ 	private:
+@@ -72,6 +75,7 @@ class MouseSettings {
+ 
+ 	private:
+ 		mouse_settings	fSettings;
++		bool			fNaturalScrolling;
+ 
+ 		// FIXME all these extra settings are not specific to each mouse.
+ 		// They should be moved into MultipleMouseSettings directly
