@@ -51,19 +51,65 @@ Symptom: `SSL certificate OpenSSL verify result: certificate is not yet valid (9
 Run it at boot (`scripts/guest/UserBootscript.snippet`).
 
 **`pkgman` can't download anything**: `Refreshing repository … failed`,
-`Failed to download package curl: Operation not supported`. Haiku's network kit on
-this build has no TLS (no OpenSSL). → Download the `.hpkg` on another machine from
-`https://eu.hpkg.haiku-os.org/haikuports/master/build-packages/packages/<name>-<version>-<arch>.hpkg`
-and check it against
-`package_repo list -v /boot/system/cache/package-repositories/HaikuPorts`.
-Copy it to a staging dir on `/boot`, then `mv` it into `/boot/system/packages`;
+`Failed to download package curl: Operation not supported`. `libbnetapi.so` is
+built without `OPENSSL_ENABLED` on arm64, because the build only enables TLS when
+an `openssl3` package exists for the architecture, and none does. So
+`BSecureSocket` returns `B_NOT_SUPPORTED` for every `https://` request.
+→ Fixed by `scripts/container/build-haiku-netssl.sh` (guide step 11). It
+packages our OpenSSL as `openssl3` and rebuilds `libbnetapi.so` against it
+(`patches/haiku/netapi-local-openssl.patch`). It then repacks `haiku`/`haiku_devel`
+as revision 3, requiring `lib:libssl`/`lib:libcrypto` as x86_64 does.
+Certificates come from OpenSSL's default verify file
+(`/boot/system/non-packaged/data/ssl/cert.pem`). Before that fix, the way in was:
+download the `.hpkg` on another machine from
+`https://eu.hpkg.haiku-os.org/haikuports/master/build-packages/packages/<name>-<version>-<arch>.hpkg`,
+check it against
+`package_repo list -v /boot/system/cache/package-repositories/HaikuPorts`,
+copy it to a staging dir on `/boot`, then `mv` it into `/boot/system/packages`.
 `package_daemon` activates it in seconds.
 
-**The arm64 HaikuPorts repo is a bootstrap set, not empty**: bash, binutils, bison,
-ca_root_certificates, coreutils, curl, expat, findutils, flex, gawk, gcc 13.3
-(native), grep, haikuporter, icu74, less, libffi, m4, make, ncurses6, python3.10,
-sed, texinfo, zlib (+ `_devel`). Checking `repo.info` with curl is misleading:
-`repo` is a binary file, so ask `pkgman search -a ""` on the guest instead.
+**OpenSSL for system libraries must be packaged, not in `non-packaged`.** In
+safe mode ("disable user add-ons"), runtime_loader drops every `non-packaged`
+and user directory from the library path (`search_path_for_type` in
+`runtime_loader.cpp`). A `libbnetapi.so` whose `libssl.so.3` lives only in
+`non-packaged/lib` would then stop every networked app from starting. Hence the
+`openssl3` package in `/boot/system/lib`. The `non-packaged` copies are the same
+build and are found first in normal mode.
+
+**With TLS working, downloads 404**: `Failed to download package m4: Resource not found`.
+The HaikuPorts repo config's `baseurl` is
+`https://eu.hpkg.haiku-os.org/haikuports/master/arm64/current`, but upstream
+has **no arm64 HaikuPorts index**. `repo`, `repo.sha256` and `repo.info` there
+are a 2-byte `[]` placeholder, and nothing is under `packages/`. The only index
+is the one baked into the image (repository `HaikuPorts-BuildPackages`). Its files
+are under `…/haikuports/master/build-packages/packages/`, and that directory has
+no `repo` file of its own. pkgman builds download URLs from the config's
+`baseurl`, not from the cached index's `base-url`. → In
+`/boot/system/settings/package-repositories/HaikuPorts` set
+`baseurl=https://eu.hpkg.haiku-os.org/haikuports/master/build-packages`.
+`pkgman refresh` then reports `Resource not found` for HaikuPorts. That's harmless:
+the cached index stays and `pkgman install` downloads and verifies checksums.
+
+**The `bison-3.8.2_bootstrap-1` arm64 package contains an x86_64 Linux binary**
+(`readelf -l`: interpreter `/lib64/ld-linux-x86-64.so.2`, `NEEDED libc.so.6`).
+It exits 16 with no output, and `strace` says `Failed to start 'bison': Bad data`.
+That's an upstream packaging bug, so don't install it; configure scripts would
+detect a broken bison. m4 and flex from the same set work.
+
+**`pkgman update` can undo the local system packages.** The Haiku repo
+(`haiku/master/arm64/current`) is real and moves with the nightlies. Once it
+serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-3`, and an
+update would install the stock package again, without TLS or the Chromium fixes.
+`rchromium` requires `haiku_rchromium_fixes`, so the solver should balk, but
+check the plan before saying yes. To move to a newer hrev, rebuild the system
+packages from it.
+
+**The arm64 HaikuPorts repo is a bootstrap set, not empty**: bash, binutils, bison
+(broken, see below), ca_root_certificates, coreutils, curl, expat, findutils, flex,
+gawk, gcc 13.3 (native), grep, haikuporter, icu74, less, libffi, m4, make,
+ncurses6, python3.10, sed, texinfo, zlib (+ `_devel`). That set is fixed in the
+image's cached index; upstream publishes no arm64 index to refresh it from.
+Ask `pkgman search -a ""` on the guest.
 
 **zstd packages won't activate**: `ca_root_certificates` fails with
 `Failed to decompress chunk data: Operation not supported` (packagefs here has

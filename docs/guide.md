@@ -96,7 +96,7 @@ From here on, `tools/push-tree.sh out/<component> haiku` installs a whole tree.
 
 ## 6. Bootstrap packages (native gcc, make, sed, grep, …)
 
-`pkgman` can't download (no TLS). Ask it for the plan, fetch on the host and drop them in:
+`pkgman` can't download yet (no TLS until step 11). Ask it for the plan, fetch on the host and drop them in:
 
 ```sh
 ssh haiku 'pkgman install -y curl make gcc binutils haiku_devel gcc_syslibs_devel sed grep less findutils gawk > /tmp/plan.txt 2>&1; cat /tmp/plan.txt'
@@ -150,3 +150,22 @@ ssh haiku 'cd /boot/home/src && nohup sh build-perl-native.sh > perl-build.log 2
 Moved to its own repo: [aarch64-unknown-haiku](https://github.com/bluevisor/aarch64-unknown-haiku)
 (target patch, build scripts, binaries). It builds on the cross toolchain from
 step 4 and the HTTP/2 curl from step 7, and over ssh it needs the `SetEnv` from step 5.
+
+## 11. pkgman over HTTPS
+
+Builds on step 7 (OpenSSL + CA bundle) and on the revision-2 system packages from
+[chromium.md](chromium.md) (`build-haiku-chromium-fixes.sh`).
+
+```sh
+docker exec haiku-bfs bash /repo/scripts/container/build-haiku-netssl.sh   # ~1 min
+# out/haiku-system: openssl3-3.5.9-1, haiku-…-3, haiku_devel-…-3
+scp out/haiku-system/openssl3-*.hpkg out/haiku-system/*-3-arm64.hpkg haiku:/boot/home/stage/
+ssh haiku 'cd /boot/home/stage && pkgman install -y ./openssl3-*.hpkg ./haiku-*-3-arm64.hpkg ./haiku_devel-*-3-arm64.hpkg'
+# reboot (shutdown, then UTM stop by kill + start)
+# downloads must go to build-packages/, not the empty arm64/current index:
+ssh haiku 'sed -i "s|^baseurl=.*|baseurl=https://eu.hpkg.haiku-os.org/haikuports/master/build-packages|" /boot/system/settings/package-repositories/HaikuPorts'
+ssh haiku 'pkgman install -y m4 flex'
+```
+
+`pkgman refresh` still prints `Resource not found` for HaikuPorts, which is
+expected (see findings). Skip `bison`: its arm64 package holds an x86_64 binary.
