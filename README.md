@@ -19,6 +19,7 @@ take it from there to:
 | git | 2.56.0 | cross-built | HTTPS clone, commit, log |
 | Python | 3.12.15 + pip 25 | cross-built | `ssl`, `ctypes`, `curses`; `pip install` works |
 | Perl | 5.42.2 | built **natively** on the VM | core tests pass apart from Haiku limits |
+| **Chromium** | R Chromium 154 (third-party) | [docs/chromium.md](docs/chromium.md): rebased kernel + loader fixes, RLIM_INFINITY shim | renders haiku-os.org, GitHub, Google over HTTPS |
 | **Rust** | 1.101.0-nightly, LLVM 23 | own repo: [aarch64-unknown-haiku](https://github.com/bluevisor/aarch64-unknown-haiku) | native `cargo build` with crates.io deps and proc-macros; `cargo install ripgrep` works |
 
 Built against **hrev60290** (2026-10-21). Binaries are in the
@@ -83,6 +84,7 @@ are the build adjustments noted in the scripts.
 ## Docs
 
 - [docs/guide.md](docs/guide.md): the full walkthrough in the order it was done
+- [docs/chromium.md](docs/chromium.md): running Chromium (R Chromium) on stock hrev60290
 - [docs/findings.md](docs/findings.md): every bug, quirk and dead end, with symptom → cause → fix
 - [THIRD_PARTY.md](THIRD_PARTY.md): licenses of the software in the release
 

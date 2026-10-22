@@ -188,6 +188,20 @@ registration line; std needs no changes (prior art: felipedbene/Haiku-Graviton
 - Use a nightly ≥ 2026-10-13: before that, `File::lock` returns Unsupported on
   Haiku and cargo silently runs without its file locks.
 
+## Chromium
+
+- Stock Haiku arm64 can't load clang-built Chromium: the runtime loader has
+  no `R_AARCH64_TLSDESC` support. A kernel `lock_memory_etc()` partial-failure
+  path also panics (`VMArea::Unwire(...): no such range`). Both fixed in
+  `patches/haiku/rchromium-fixes-hrev60290.patch`.
+- `Received signal 30 BUS_ADRALN` at startup is a `brk #1` CHECK, not an
+  alignment problem. **`RLIM_INFINITY` changed from `0xffffffff` to all ones**
+  after hrev60071, so binaries built against older headers misread "unlimited"
+  as -1. See `chromium/rlimit_compat.c` and [chromium.md](chromium.md).
+- pkgman's `pkgman install <local file>` refuses a new `haiku` revision while
+  `haiku_devel` requires `haiku==<exact version>`: repack both and install them
+  in one transaction.
+
 ## What's missing on arm64
 
 Blocked upstream: **Go** (no haiku/arm64 port),
