@@ -23,7 +23,7 @@ take it from there to:
 | **pkgman over HTTPS** | `openssl3` + `haiku` rev 3 | `scripts/container/build-haiku-netssl.sh`: `libbnetapi.so` rebuilt with OpenSSL | `pkgman install` downloads + verifies from HaikuPorts |
 | **pkgman repo** | diffutils 3.12, patch 2.8, tar 1.35, gzip 1.15, xz 5.8.4, zstd 1.5.7, pkgconf 3.0.10 | `build-core-tools.sh` + `make-package-repo.sh`, served at [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages) | `pkgman add-repo` + `pkgman install`; tar round-trips gzip/xz/zstd |
 | ↳ tier 2 | bzip2 1.0.8, zip 3.0, unzip 6.10c23, nano 9.1, ninja 1.13.2, cmake 4.4.4, libiconv 1.18 | `build-dev-tools.sh` | cmake+ninja+pkg-config build a C++ project; cmake HTTPS downloads; zip keeps BFS attributes; nano edits/saves |
-| ↳ base stack | openssl3 3.5.9 rev 2, ca_root_certificates, nghttp2, curl, git, openssh, sqlite, python3.12 (+bz2/lzma/sqlite3), perl | `build-stack.sh`, `package-perl.sh` | replaces the `non-packaged` installs; pkgman, pip, cargo, git, curl and cmake all verify TLS against the packaged CA store |
+| ↳ base stack | openssl3 3.5.9 rev 2, ca_root_certificates, nghttp2, curl, git, openssh, sqlite, python3.12 (+bz2/lzma/sqlite3), perl, ncurses6 6.6_release | `build-stack.sh`, `package-perl.sh` | replaces the `non-packaged` installs; pkgman, pip, cargo, git, curl and cmake all verify TLS against the packaged CA store |
 | **Rust** | 1.101.0-nightly, LLVM 23 | own repo: [aarch64-unknown-haiku](https://github.com/bluevisor/aarch64-unknown-haiku) | native `cargo build` with crates.io deps and proc-macros; `cargo install ripgrep` works |
 
 Built against **hrev60290** (2026-10-21). Binaries are in the

@@ -115,11 +115,25 @@ Other gnulib run tests in tar, patch and gzip have cross defaults and need nothi
 exists. The bootstrap `ncurses6-6.6_bootstrap-1` library has the built-in
 terminfo path `/packages/ncurses6_bootstrap-6.6-1/.self/data/terminfo` (`strings
 libncursesw.so.6.6.0`). packagefs mounts the package as `/packages/ncurses6-6.6_bootstrap-1`,
-so the default lookup always misses. → Set `TERMINFO_DIRS`
-(`scripts/guest/UserSetupEnvironment.snippet` for Terminal; add the same
-variable to sshd's `SetEnv` for ssh). Python's `curses.setupterm()` then sees 256 colors.
-The real fix is an ncurses6 rebuild. A replacement must also sort above
-`6.6_bootstrap`, and plain `6.6` sorts below it.
+so the default lookup always misses. → The repo's `ncurses6-6.6_release`
+(`build-stack.sh`) has built-in dirs
+`/boot/home/config/non-packaged/data/terminfo:…:/boot/system/data/terminfo` and
+ships the database, so no environment setup is needed. Exporting `TERMINFO_DIRS`
+with those paths also works around it.
+- **Version order:** `BPackageVersion::Compare` compares each version part
+  with an ICU collator (`NaturalCompare`, numeric sorting). `6.6`, `6.6.0` and
+  `6.6_20260101` all sort *below* `6.6_bootstrap`: a prefix sorts first, and digits
+  sort before letters. `6.6_p…`, `6.6_release` and `6.7` sort above it. Raising
+  the repo priority doesn't help either, because a lower version counts as a
+  downgrade. Checked with a test program on the guest.
+- **Building it:** ncurses' old autoconf rejects `--docdir`/`--datarootdir`
+  (the recipe's `--omit-dirs`). The HaikuPorts patchset hard-codes libtool's
+  `.libs/tic` and fails without `--with-libtool` (`cannot stat '.libs/tic'`).
+  Installing the terminfo database needs a build-machine `tic` of the same
+  version on PATH. Its lib files are `.so.6.6`, so `lib:libncurses = 6.6.0` (what
+  `haiku` requires) is declared explicitly.
+- Shell trap: `strings … | grep -q` under `set -o pipefail` fails with exit 141
+  (grep exits early and strings gets SIGPIPE).
 
 **Haiku has no iconv.** libroot doesn't provide `iconv_open`, and there's no
 arm64 libiconv package. CMake's bundled libarchive stops with

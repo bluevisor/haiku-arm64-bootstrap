@@ -1,6 +1,6 @@
 #!/bin/bash
 # Package the stack that guide steps 5-9 installed by hand into non-packaged:
-# ca_root_certificates, openssl3, nghttp2, curl, git, openssh, sqlite and
+# ca_root_certificates, openssl3, nghttp2, curl, git, openssh, sqlite, ncurses6 and
 # python3.12 (now with _bz2, _lzma and _sqlite3). Perl is built on the guest
 # (scripts/guest/build-perl-native.sh PKG=1) and packaged by package-perl.sh.
 #
@@ -25,6 +25,7 @@ declare -A SHA=(
 	[sqlite-autoconf-3530400.tar.gz]=0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c
 	[Python-3.12.15.tar.xz]=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a
 	[cacert-2026-10-20.pem]=796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe
+	[ncurses-snapshots-6_6.tar.gz]=5109f372b0e80f59603808947f6fc63c8fd4146768ebfa13982459946113effd
 )
 declare -A URL=(
 	[openssl-3.5.9.tar.gz]=https://github.com/openssl/openssl/releases/download/openssl-3.5.9
@@ -231,6 +232,67 @@ to_sysroot $R
 package $R sqlite 3.53.4.0 "A self-contained, serverless SQL database engine" \
 	"libsqlite3 and the sqlite3 shell (FTS3/FTS5, R*Tree, DBSTAT, column metadata)." \
 	"Public Domain" "Public Domain"
+fi
+
+# --- ncurses6 6.6 as 6.6_release: replaces the bootstrap ncurses6, whose
+# built-in terminfo path is /packages/ncurses6_bootstrap-6.6-1/.self/data/terminfo
+# (the package mounts as ncurses6-6.6_bootstrap-1), so every lookup fails
+# without TERMINFO_DIRS. Haiku's version order (ICU, numeric) puts 6.6 and
+# 6.6_<date> below 6.6_bootstrap, 6.6_release above it. ---
+if want ncurses6; then
+NC_TGZ=ncurses-snapshots-6_6.tar.gz
+cd $SRC
+[ -f $NC_TGZ ] || wget -q -T 60 -O $NC_TGZ https://github.com/ThomasDickey/ncurses-snapshots/archive/refs/tags/v6_6.tar.gz
+unpack $NC_TGZ
+# The recipe's only patch (ncurses6-6.6.patchset) installs libtool's .libs/tic
+# etc.; this build uses ncurses' own shared-lib rules (no libtool wrappers), so
+# it doesn't apply ("cannot stat '.libs/tic'").
+# a build-machine tic of the same version compiles the terminfo database at
+# install time (run_tic.sh can't run the Haiku one)
+mkdir host-tic && (cd host-tic && ../configure --without-shared --without-cxx \
+	--without-ada --without-tests --without-manpages --disable-db-install >/dev/null \
+	&& make $J >/dev/null)
+export PATH=$PWD/host-tic/progs:$PATH
+TD=/boot/home/config/non-packaged/data/terminfo:/boot/home/config/data/terminfo:/boot/system/non-packaged/data/terminfo:/boot/system/data/terminfo
+# recipe flags, but ncurses' own shared-library rules instead of libtool. Its
+# old autoconf rejects --docdir/--datarootdir (the recipe's --omit-dirs), so
+# no haiku_configure here.
+./configure --host=$H --build="$(uname -m)-unknown-linux-gnu" \
+	--prefix=$S --exec-prefix=$S --bindir=$S/bin --sbindir=$S/bin \
+	--libdir=$S/lib --libexecdir=$S/lib --includedir=$S/develop/headers \
+	--datadir=$S/data --sysconfdir=$S/settings --localstatedir=$S/var \
+	--mandir=$S/documentation/man --infodir=$S/documentation/info \
+	--with-build-cc=gcc \
+	--with-shared --without-normal --with-cxx-shared --without-debug \
+	--with-default-terminfo-dir=$S/data/terminfo --with-terminfo-dirs=$TD \
+	--disable-relink --disable-root-access --enable-root-environ \
+	--disable-setuid-environ --enable-hard-tabs --enable-pc-files \
+	--enable-symlinks --enable-termcap --without-ada --without-tests \
+	--with-pkg-config-libdir=$S/develop/lib/pkgconfig >/dev/null
+make $J >/dev/null
+R=$(dest ncurses6)
+make install DESTDIR=$R >/dev/null
+R=$R$S
+# (not grep -q: it exits early, strings gets SIGPIPE, pipefail fails the run)
+strings $R/lib/libncursesw.so.6.6 | grep -F -x "$TD" >/dev/null
+# the recipe's non-wide aliases, which haiku itself requires (lib:libncurses)
+for l in form menu ncurses ncurses++ panel; do
+	ln -sn lib${l}w.so.6 $R/lib/lib${l}.so.6
+	ln -sn lib${l}w.so $R/lib/lib${l}.so
+	ln -sn ${l}w.pc $R/develop/lib/pkgconfig/${l}.pc
+done
+tidy $R
+to_sysroot $R
+# lib: provides at 6.6.0 like the bootstrap package (haiku requires
+# lib:libncurses >= 6.6.0; the files are .so.6.6, which would sort below it)
+NCPROV=""
+for l in form formw menu menuw ncurses ncursesw ncurses++ ncurses++w panel panelw; do
+	NCPROV+="	lib:lib$l = 6.6.0 compat >= 6"$'\n'
+done
+EXTRA_PROVIDES="${NCPROV%$'\n'}" package $R ncurses6 6.6_release \
+	"New curses library" \
+	"ncurses 6.6 (wide-character libncursesw, form, menu, panel, C++ binding), tic/infocmp/tput/clear and the terminfo database in /boot/system/data/terminfo. Replaces the arm64 bootstrap ncurses6, whose terminfo path is wrong." \
+	"1998-2025 Free Software Foundation, Inc., Thomas E. Dickey" "MIT"
 fi
 
 # --- python3.12 3.12.15, prefix /boot/system (the HaikuPorts haiku install

@@ -181,10 +181,11 @@ pkgman repository (GitHub Pages). Needs step 11:
 ssh haiku 'pkgman add-repo https://bluevisor.github.io/haiku-arm64-packages'
 ssh haiku 'pkgman install -y diffutils patch tar gzip xz_utils zstd pkgconf'
 ssh haiku 'pkgman install -y bzip2 zip unzip nano ninja cmake'   # + libiconv
+ssh haiku 'pkgman install -y ncurses6'   # 6.6_release: fixes the bootstrap's terminfo path
 ```
 
-ncurses programs (nano, `clear`) need `TERMINFO_DIRS`: apply
-`scripts/guest/UserSetupEnvironment.snippet` (see findings for why).
+Without the repo's `ncurses6`, ncurses programs (nano, `clear`, Python curses)
+can't find any terminfo entry; see findings.
 
 To rebuild the packages and the index:
 

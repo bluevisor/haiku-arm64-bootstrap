@@ -1,9 +1,0 @@
-# Append to ~/config/settings/boot/UserSetupEnvironment (Terminal and apps
-# started from Deskbar/Tracker), and add the same TERMINFO_DIRS="..." to the
-# SetEnv line of /boot/system/settings/ssh/sshd_config for ssh sessions.
-#
-# The HaikuPorts bootstrap ncurses6 for arm64 was built with the terminfo path
-# /packages/ncurses6_bootstrap-6.6-1/.self/data/terminfo, but the package
-# mounts as ncurses6-6.6_bootstrap-1, so ncurses programs (nano, clear,
-# Python curses) fail with "cannot initialize terminal type".
-export TERMINFO_DIRS="/boot/home/config/non-packaged/data/terminfo:/boot/home/config/data/terminfo:/boot/system/non-packaged/data/terminfo:/boot/system/data/terminfo"

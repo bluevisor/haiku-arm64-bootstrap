@@ -87,9 +87,13 @@ tidy() {
 		mkdir -p "$r/develop/lib/pkgconfig"
 		mv "$r"/lib/pkgconfig/*.pc "$r/develop/lib/pkgconfig/"
 		rmdir "$r/lib/pkgconfig"
-		sed -i "s|^libdir=.*|libdir=$S/develop/lib|" "$r"/develop/lib/pkgconfig/*.pc
+	fi
+	# also .pc files installed straight into develop/lib/pkgconfig (ncurses)
+	if compgen -G "$r/develop/lib/pkgconfig/*.pc" >/dev/null; then
+		sed -i --follow-symlinks "s|^libdir=.*|libdir=$S/develop/lib|" "$r"/develop/lib/pkgconfig/*.pc
 		# headers moved to develop/headers (OpenSSL installs to $prefix/include)
-		sed -i -E "s#^includedir=(\\\$\\{prefix\\}|$S)/include[[:space:]]*\$#includedir=$S/develop/headers#" \
+		sed -i --follow-symlinks -E \
+			"s#^includedir=(\\\$\\{prefix\\}|$S)/include[[:space:]]*\$#includedir=$S/develop/headers#" \
 			"$r"/develop/lib/pkgconfig/*.pc
 	fi
 	find "$r" -type f -exec sh -c \
@@ -113,7 +117,8 @@ to_sysroot() {
 # the library's own version, e.g. libpkgconf.so.7.0.0 -> 7.0.0 compat >= 7).
 # requires: haiku, plus lib: for every NEEDED library from another package.
 # Optional env: REV (package revision), ARCH (default arm64; "any" for data),
-# EXTRA_REQUIRES (more requires entries), EXTRA_INFO (raw .PackageInfo text:
+# EXTRA_PROVIDES (raw provides lines), EXTRA_REQUIRES (more requires
+# entries), EXTRA_INFO (raw .PackageInfo text:
 # users, groups, global_writable_files, post_install_scripts, ...).
 package() {
 	local r=$1 name=$2 ver=$3 summary=$4 desc=$5 copy=$6; shift 6
@@ -142,6 +147,7 @@ package() {
 			req+=("lib:$l")
 		done
 	done < <(find "$r" -type f -print0)
+	[ -z "${EXTRA_PROVIDES:-}" ] || prov+=$'\n'"$EXTRA_PROVIDES"
 	req+=(${EXTRA_REQUIRES:-})
 	local licenses=""
 	for l in "$@"; do licenses+=" \"$l\""; done
