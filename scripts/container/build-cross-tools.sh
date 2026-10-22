@@ -32,6 +32,19 @@ for p in "haiku_devel-$HREV-1-arm64.hpkg" "haiku-$HREV-1-arm64.hpkg"; do
 	LD_LIBRARY_PATH=/build/haiku/generated/objects/linux/lib "$PKG" extract -C "$SR" "$p"
 done
 
+# libgcc_s / libstdc++ (the cross build only makes a static libgcc). Without
+# them, linking anything shared fails with "ld: cannot find -lgcc_s" -- Rust's
+# libstd.so, for one.
+BP=https://eu.hpkg.haiku-os.org/haikuports/master/build-packages/packages
+while read -r p sum; do
+	[ -f "$p" ] || wget -q "$BP/$p"
+	echo "$sum  $p" | sha256sum -c --quiet
+	LD_LIBRARY_PATH=/build/haiku/generated/objects/linux/lib "$PKG" extract -C "$SR" "$p"
+done <<'EOF'
+gcc_syslibs-13.3.0_2026_03_29_bootstrap-1-arm64.hpkg d8aad73b29b4c1a588923254be62aa09652cdd76bb03d9e1585c778f6a5d77fc
+gcc_syslibs_devel-13.3.0_2026_03_29_bootstrap-1-arm64.hpkg 559cff3b2eaedb67358e88fb2be88043969b172accb1b7acc796c51653ade9ed
+EOF
+
 # smoke test
 cat > /tmp/hello.c <<'EOF'
 #include <stdio.h>

@@ -163,10 +163,34 @@ denied") until `PermitRootLogin yes`; keys still work.
 - With `-Ddont_use_nlink` (BFS link counts), `installperl` copies `bin/perl` and
   `bin/perlthanks` as 0644, so you get "Permission denied" until chmod 755.
 
+## Rust (`aarch64-unknown-haiku`)
+
+Upstream rustc has only i686/x86_64 Haiku targets. Adding the target is ~25
+lines (AArch64 ELF data layout + `base::haiku::opts()` + PIE) plus one
+registration line; std needs no changes (prior art: felipedbene/Haiku-Graviton
+`haiku-rust-bake`, rainygirl/renkuos-rchromium-arm64 `rust/`). Gotchas hit:
+
+- Bootstrap refuses the unknown target ("target not in stage0 list"):
+  `BOOTSTRAP_SKIP_TARGET_SANITY=1`.
+- `download-ci-llvm` must be **false** for a cross-hosted rustc (rustc_llvm
+  rewrites the build host's llvm-config paths to the target's).
+- `ld: cannot find -lgcc_s` linking libstd.so: the cross toolchain only builds a
+  static libgcc. Extract the `gcc_syslibs` + `gcc_syslibs_devel` hpkgs into the sysroot.
+- `x.py dist` wipes `build/host/stage1/bin` when it starts; snapshot stage1
+  before using it for a parallel cargo build.
+- cargo forces curl's `http2` feature; without HTTP/2 in the system libcurl,
+  curl-sys compiles its own static curl. Build nghttp2 and curl `--with-nghttp2`.
+- **cargo's child `rustc` exits with status 3 and no message over ssh.** cargo
+  prepends to `LIBRARY_PATH`, which is empty in ssh sessions, so the runtime
+  loader loses its default search path. Fix for all sessions: at the top of
+  `sshd_config`,
+  `SetEnv LIBRARY_PATH="%A/lib:/boot/home/config/non-packaged/lib:/boot/home/config/lib:/boot/system/non-packaged/lib:/boot/system/lib" ADDON_PATH="…"`.
+- Use a nightly ≥ 2026-10-13: before that, `File::lock` returns Unsupported on
+  Haiku and cargo silently runs without its file locks.
+
 ## What's missing on arm64
 
-Blocked upstream: **Rust** (no `aarch64-unknown-haiku` target; the `libc` crate's
-arm64 module is a commented-out stub), **Go** (no haiku/arm64 port),
+Blocked upstream: **Go** (no haiku/arm64 port),
 **gdb**, Java, GHC, Zig.
 
 HaikuPorts recipes allow arm64 but nothing has been built yet: autoconf,
