@@ -39,11 +39,36 @@ right after start. Without `-d`, macOS `nc` drops the connection on stdin EOF.
 Haiku logs the whole boot (loader + kernel) to the PL011 port. From a shell,
 `cmd | tee /dev/dprintf` sends output there too.
 
-**Shutdown**: UTM's `stop … by request` (ACPI) is ignored. `shutdown` and
-`shutdown -r` in Haiku stop all apps but never power off or reset (UTM shows
-"Display output is not active"). The disk is synced by then, so `stop … by kill` is safe.
+**Shutdown**: UTM's `stop … by request` (ACPI power button) is ignored. On stock
+arm64 Haiku, `shutdown` and `shutdown -r` stop all apps but never power off or
+reset (UTM shows "Display output is not active"): `arch_cpu_shutdown()` is a stub
+returning `B_ERROR`. The disk is synced by then, so `stop … by kill` is safe.
+→ Fixed by `scripts/container/build-haiku-psci.sh` (`haiku` revision 4, guide
+step 11): PSCI `SYSTEM_OFF`/`SYSTEM_RESET`, conduit from the FADT ARM boot flags
+(UTM: HVC; the boot log says `arm64: PSCI shutdown/reboot via hvc`). Verified with
+8 vCPUs: `shutdown -r` is back on SSH in ~18 s, and `shutdown` leaves UTM showing
+the VM as stopped within ~2 s. ACPI's reset register and S5 don't help, because
+QEMU virt's arm64 FADT is hardware-reduced and has neither.
+- **KDL `reboot` with SMP still needs a UTM kill.** The reset happens (firmware and
+  loader run), but the next boot stops after `Calling ExitBootServices. So long,
+  EFI!` with QEMU at ~290% CPU. The kernel never prints `Welcome to kernel
+  debugger output!`, which comes after `_start`'s first `smp_cpu_rendezvous()`,
+  so a secondary CPU never starts. With 1 vCPU, KDL `reboot` boots normally. In
+  KDL the other CPUs are spinning with interrupts off when the reset is issued.
+- A KDL reset skips `sync`: files written just before it come back zero-filled.
+- To enter KDL on purpose (uid 0): call `_kern_kernel_debugger("msg")` from a
+  two-line C program. Type into KDL by connecting `nc 127.0.0.1 4555` with input
+  (the serial server takes one client, so stop any `nc -d` logger first).
 
 ## Haiku arm64 system
+
+**TCP panic on an sshd socket close (seen once, 8 vCPUs).** `PANIC: bound endpoint
+0x… not in hash!` in `EndpointManager::Unbind(TCPEndpoint*)` ← `~TCPEndpoint` ←
+`tcp_uninit_protocol` ← `socket_free` ← `close_fd_index`, from sshd's listener
+`main` closing a socket right after an incoming connection, a few seconds after
+boot. It didn't happen again in ~10 later connections and reboots. It looks like
+an SMP race in the TCP add-on (it's untouched by the local patches). If you see
+`Host is down` with UTM still `started`, read the serial log for it.
 
 **Clock starts at 1970 every boot.** There's no driver for QEMU's PL031 RTC.
 Symptom: `SSL certificate OpenSSL verify result: certificate is not yet valid (9)`.
@@ -219,8 +244,9 @@ arm64 libiconv package. CMake's bundled libarchive stops with
 
 **`pkgman update` can undo the local system packages.** The Haiku repo
 (`haiku/master/arm64/current`) is real and moves with the nightlies. Once it
-serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-3`, and an
-update would install the stock package again, without TLS or the Chromium fixes.
+serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-4`, and an
+update would install the stock package again, without TLS, PSCI shutdown or the
+Chromium fixes.
 `rchromium` requires `haiku_rchromium_fixes`, so the solver should balk, but
 check the plan before saying yes. To move to a newer hrev, rebuild the system
 packages from it.

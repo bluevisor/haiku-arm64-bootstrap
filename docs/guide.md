@@ -172,6 +172,18 @@ ssh haiku 'pkgman install -y m4 flex'
 `pkgman refresh` still prints `Resource not found` for HaikuPorts, which is
 expected (see findings). Skip `bison`: its arm64 package holds an x86_64 binary.
 
+Then make `shutdown` and `shutdown -r` power off / reset the VM (`haiku`
+revision 4, PSCI; see findings). This is the last reboot that needs UTM:
+
+```sh
+docker exec haiku-bfs bash /repo/scripts/container/build-haiku-psci.sh    # ~10 s
+scp out/haiku-system/*-4-arm64.hpkg haiku:/boot/home/stage/
+ssh haiku 'cd /boot/home/stage && pkgman install -y ./haiku-*-4-arm64.hpkg ./haiku_devel-*-4-arm64.hpkg'
+# reboot once more with UTM stop by kill + start; from then on:
+ssh haiku 'grep PSCI /var/log/syslog'   # arm64: PSCI shutdown/reboot via hvc
+ssh haiku 'shutdown -r'                  # comes back by itself
+```
+
 ## 12. Extra packages (diff, tar, xz, zstd, zip, nano, cmake, ninja, …)
 
 Prebuilt in the [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages)

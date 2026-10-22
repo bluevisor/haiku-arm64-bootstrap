@@ -43,7 +43,7 @@ scp out/haiku-system/*.hpkg haiku:/boot/home/
 # guest: snapshot the VM disk first
 pkgman install /boot/home/haiku-r1~beta6_hrev60290-2-arm64.hpkg \
                /boot/home/haiku_devel-r1~beta6_hrev60290-2-arm64.hpkg
-shutdown        # then stop/start the VM in UTM (arm64 Haiku can't reset itself)
+shutdown        # then stop/start the VM in UTM (no self-reset before rev 4, guide step 11)
 ```
 
 Afterwards `nm /boot/system/runtime_loader | grep tlsdesc` shows
