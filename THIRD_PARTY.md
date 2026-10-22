@@ -13,7 +13,7 @@ to the same release (`sources-*.tar*`), with their SHA-256 in `SHA256SUMS`.
 | CPython | 3.12.15 | PSF-2.0 | HaikuPorts `python3.12-3.12.15.patchset`, `fix-nonpackaged-scheme.py`, configure.ac `_host_cpu` fix (in `build-python.sh`) |
 | Perl | 5.42.2 | **GPL-1.0+ or Artistic-1.0** | HaikuPorts `perl-5.42.2.patchset`, makefile `LDLIBPTH` fix (in `build-perl-native.sh`) |
 | nghttp2 | 1.63.0 | MIT | none |
-| Rust (rustc, std, rustdoc) | 1.101.0-nightly (`1a2c4797ef25`) | MIT OR Apache-2.0 | new `aarch64-unknown-haiku` target spec + registration (in `build-rust.sh`) |
+| Rust (rustc, std, rustdoc) | 1.101.0-nightly (`1a2c4797ef25`) | MIT OR Apache-2.0 | `aarch64-unknown-haiku` target patch, in [bluevisor/aarch64-unknown-haiku](https://github.com/bluevisor/aarch64-unknown-haiku) |
 | LLVM (linked into librustc_driver) | 23.1.4 (Rust's fork) | Apache-2.0 WITH LLVM-exception | none |
 | cargo | 1.101.0 (`3960fa69bb61`) | MIT OR Apache-2.0 | none |
 | Mozilla CA certificates | 2025-12-02 (HaikuPorts `ca_root_certificates`) | MPL-2.0 | none |

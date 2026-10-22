@@ -147,16 +147,6 @@ ssh haiku 'cd /boot/home/src && nohup sh build-perl-native.sh > perl-build.log 2
 
 ## 10. Rust
 
-```sh
-docker exec haiku-bfs bash /repo/scripts/container/build-rust.sh    # out/rust/*.tar.gz
-docker exec haiku-bfs bash /repo/scripts/container/build-cargo.sh   # out/rust/cargo
-scp out/rust/*.tar.gz out/rust/cargo haiku:/boot/home/
-ssh haiku 'cd /boot/home && mkdir -p x && for t in rustc-*.tar.gz rust-std-*.tar.gz; do python3 -m tarfile -e $t x/; done
-  P=/boot/system/non-packaged/rust; mkdir -p $P
-  cp -a x/rustc-nightly-aarch64-unknown-haiku/rustc/. x/rust-std-nightly-aarch64-unknown-haiku/rust-std-aarch64-unknown-haiku/. $P/
-  install -m755 cargo $P/bin/cargo; rm -f $P/manifest.in
-  for b in rustc rustdoc cargo; do ln -sf ../rust/bin/$b /boot/system/non-packaged/bin/$b; done'
-ssh haiku 'rustc -vV && cargo new demo && cd demo && cargo run'
-```
-
-The ssh `SetEnv` from step 5 is required for cargo; see findings.
+Moved to its own repo: [aarch64-unknown-haiku](https://github.com/bluevisor/aarch64-unknown-haiku)
+(target patch, build scripts, binaries). It builds on the cross toolchain from
+step 4 and the HTTP/2 curl from step 7, and over ssh it needs the `SetEnv` from step 5.
