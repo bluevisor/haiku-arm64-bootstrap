@@ -1,0 +1,25 @@
+--- a/Source/cmCurl.cxx
++++ b/Source/cmCurl.cxx
+@@ -166,6 +166,22 @@
+       check_curl_result(res, "Unable to set TLS/SSL Verify CAPATH: ");
+     }
+ #  undef CMAKE_CAPATH_COMMON
++#  ifdef __HAIKU__
++#    define CMAKE_CAFILE_HAIKU "/boot/system/data/ssl/CARootCertificates.pem"
++#    define CMAKE_CAFILE_HAIKU_NP                                              \
++      "/boot/system/non-packaged/data/ssl/CARootCertificates.pem"
++    if (cmSystemTools::FileExists(CMAKE_CAFILE_HAIKU, true)) {
++      ::CURLcode res =
++        ::curl_easy_setopt(curl, CURLOPT_CAINFO, CMAKE_CAFILE_HAIKU);
++      check_curl_result(res, "Unable to set TLS/SSL Verify CAINFO: ");
++    } else if (cmSystemTools::FileExists(CMAKE_CAFILE_HAIKU_NP, true)) {
++      ::CURLcode res =
++        ::curl_easy_setopt(curl, CURLOPT_CAINFO, CMAKE_CAFILE_HAIKU_NP);
++      check_curl_result(res, "Unable to set TLS/SSL Verify CAINFO: ");
++    }
++#    undef CMAKE_CAFILE_HAIKU_NP
++#    undef CMAKE_CAFILE_HAIKU
++#  endif
+ #  ifdef _AIX
+ #    define CMAKE_CAPATH_AIX "/var/ssl/certs"
+     if (cmSystemTools::FileIsDirectory(CMAKE_CAPATH_AIX)) {

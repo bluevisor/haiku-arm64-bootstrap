@@ -10,23 +10,6 @@
 # /repo/out/packages/<name>-<version>-1-arm64.hpkg
 set -euxo pipefail
 
-X=/build/haiku/generated.arm64/cross-tools-arm64
-export PATH=$X/bin:$PATH
-SR=$X/sysroot
-H=aarch64-unknown-haiku
-HP=/build/haikuports
-PATCHES=/repo/patches/haikuports
-SRC=/build/core
-OUT=/repo/out/packages
-J=-j"$(nproc)"
-REV=1
-S=/boot/system
-
-pkgtool() {
-	LD_LIBRARY_PATH=/build/haiku/generated/objects/linux/lib \
-		/build/haiku/generated/objects/linux/arm64/release/tools/package/package "$@"
-}
-
 declare -A SHA=(
 	[diffutils-3.12.tar.xz]=7c8b7f9fc8609141fdea9cece85249d308624391ff61dedaf528fcb337727dfd
 	[patch-2.8.tar.xz]=f87cee69eec2b4fcbf60a396b030ad6aa3415f192aa5f7ee84cad5e11f7f5ae3
@@ -46,102 +29,12 @@ declare -A URL=(
 	[gzip-1.15.tar.xz]=https://ftp.gnu.org/gnu/gzip
 )
 
-# unpack <tarball>: fresh source tree in $SRC/build, cwd set to it
-unpack() {
-	cd $SRC
-	[ -f "$1" ] || wget -q "${URL[$1]}/$1"
-	echo "${SHA[$1]}  $1" | sha256sum -c -
-	rm -rf "$SRC/build/${1%.tar.*}" && mkdir -p "$SRC/build"
-	tar xf "$1" -C "$SRC/build"
-	cd "$SRC/build/${1%.tar.*}"
-}
+source "$(dirname "$0")/hpkg-common.sh"
 
-# HaikuPorts' runConfigure directory set for the system package location
-haiku_configure() {
-	local name=$1; shift
-	./configure --host=$H --build="$(uname -m)-unknown-linux-gnu" \
-		--prefix=$S --exec-prefix=$S --bindir=$S/bin --sbindir=$S/bin \
-		--libdir=$S/lib --libexecdir=$S/lib --includedir=$S/develop/headers \
-		--datarootdir=$S/data --datadir=$S/data --sysconfdir=$S/settings \
-		--localstatedir=$S/var --sharedstatedir=$S/var/com \
-		--mandir=$S/documentation/man --infodir=$S/documentation/info \
-		--docdir=$S/documentation/packages/$name "$@"
-}
-
-# dest <name>: clean DESTDIR for a package; prints the package root
-dest() {
-	rm -rf "$SRC/dest/$1" && mkdir -p "$SRC/dest/$1"
-	echo "$SRC/dest/$1"
-}
-
-# tidy <root>: Haiku layout fixes (HaikuPorts prepareInstalledDevelLib,
-# fixPkgconfig), drop libtool/charset/info-dir files, strip ELF files
-tidy() {
-	local r=$1 f so
-	rm -f "$r"/lib/*.la "$r"/lib/charset.alias "$r"/documentation/info/dir
-	for f in "$r"/lib/lib*.so; do
-		[ -L "$f" ] || continue
-		so=$($H-readelf -d "$f" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
-		mkdir -p "$r/develop/lib"
-		rm "$f" && ln -s "../../lib/$so" "$r/develop/lib/${f##*/}"
-	done
-	if [ -d "$r/lib/pkgconfig" ]; then
-		mkdir -p "$r/develop/lib/pkgconfig"
-		mv "$r"/lib/pkgconfig/*.pc "$r/develop/lib/pkgconfig/"
-		rmdir "$r/lib/pkgconfig"
-		sed -i "s|^libdir=.*|libdir=$S/develop/lib|" "$r"/develop/lib/pkgconfig/*.pc
-	fi
-	find "$r" -type f -exec sh -c \
-		'head -c4 "$1" | grep -q "^.ELF" && '$H'-strip --strip-unneeded "$1"' _ {} \;
-	rmdir "$r"/lib 2>/dev/null || true
-}
-
-# package <root> <name> <version> <summary> <description> <copyright> <licenses...>
-# provides: <name>, cmd: per bin/ entry, lib:/devel: per shared library (at
-# the library's own version, e.g. libpkgconf.so.7.0.0 -> 7.0.0 compat >= 7).
-# requires: haiku, plus lib: for every NEEDED library from another package.
-package() {
-	local r=$1 name=$2 ver=$3 summary=$4 desc=$5 copy=$6; shift 6
-	local f b so lib libver prov req=() l
-	prov="	$name = $ver compat >= ${ver%%.*}"
-	for f in "$r"/bin/*; do
-		[ -e "$f" ] || continue
-		b=${f##*/}
-		prov+=$'\n'"	cmd:${b//-/_} = $ver compat >= ${ver%%.*}"
-	done
-	for f in "$r"/lib/lib*.so.*; do
-		[ -f "$f" ] && [ ! -L "$f" ] || continue
-		so=$($H-readelf -d "$f" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
-		lib=${so%%.so*}; libver=${f##*.so.}
-		prov+=$'\n'"	lib:$lib = $libver compat >= ${so##*.so.}"
-		[ -e "$r/develop/lib/$lib.so" ] && prov+=$'\n'"	devel:$lib = $libver compat >= ${so##*.so.}"
-	done
-	for f in $(find "$r" -type f); do
-		head -c4 "$f" | grep -q '^.ELF' || continue
-		for l in $($H-readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(lib[^.]*\)\.so.*\]/\1/p'); do
-			case $l in libroot|libbe|libnetwork|libbnetapi|libbsd|libgnu) continue ;; # haiku
-			esac
-			compgen -G "$r/lib/$l.so.*" >/dev/null && continue # this package
-			req+=("lib:$l")
-		done
-	done
-	local licenses=""
-	for l in "$@"; do licenses+=" \"$l\""; done
-	{
-		printf 'name\t\t\t%s\nversion\t\t\t%s-%s\narchitecture\tarm64\n' "$name" "$ver" $REV
-		printf 'summary\t\t\t"%s"\ndescription\t\t"%s"\n' "$summary" "$desc"
-		printf 'packager\t\t"haiku-arm64-bootstrap"\nvendor\t\t\t"haiku-arm64-bootstrap"\n'
-		printf 'copyrights\t\t{ "%s" }\nlicenses\t\t{%s }\n' "$copy" "$licenses"
-		printf 'provides {\n%s\n}\n' "$prov"
-		printf 'requires {\n\thaiku\n'
-		[ ${#req[@]} -eq 0 ] || printf '\t%s\n' $(printf '%s\n' "${req[@]}" | sort -u)
-		printf '}\n'
-	} > "$r/.PackageInfo"
-	cat "$r/.PackageInfo"
-	(cd "$r" && pkgtool create -q -z zlib -i .PackageInfo "$OUT/$name-$ver-$REV-arm64.hpkg")
-}
-
-mkdir -p $SRC $OUT
+# These were built (and published) before libiconv existed. Keep them
+# iconv-free so the result doesn't depend on whether build-dev-tools.sh has
+# put libiconv into the sysroot (tar then fails: undefined libiconv_open).
+export am_cv_func_iconv=no
 
 # --- xz_utils 5.8.4 (first: zstd links liblzma) ---
 unpack xz-5.8.4.tar.xz
@@ -154,8 +47,7 @@ mkdir -p $R/data/expander/rules $R/data/licenses
 cp $HP/app-arch/xz_utils/additional-files/xz_utils-expander-rules $R/data/expander/rules/xz_utils
 cp COPYING.0BSD "$R/data/licenses/BSD (0-clause)"
 tidy $R
-# the cross linker searches develop/lib, so install the tidied layout
-cp -a $R/lib $R/develop $SR/boot/system/
+to_sysroot $R # zstd links liblzma
 package $R xz_utils 5.8.4 "Free general-purpose data compression software" \
 	"XZ Utils are free general-purpose data compression tools with a high compression ratio. They are the successors to LZMA Utils." \
 	"2005-2025 Lasse Collin and the XZ Utils contributors" "BSD (0-clause)" "GNU GPL v2"

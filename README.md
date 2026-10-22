@@ -22,6 +22,7 @@ take it from there to:
 | **Chromium** | R Chromium 154 (third-party) | [docs/chromium.md](docs/chromium.md): rebased kernel + loader fixes, RLIM_INFINITY shim | renders haiku-os.org, GitHub, Google over HTTPS |
 | **pkgman over HTTPS** | `openssl3` + `haiku` rev 3 | `scripts/container/build-haiku-netssl.sh`: `libbnetapi.so` rebuilt with OpenSSL | `pkgman install` downloads + verifies from HaikuPorts |
 | **pkgman repo** | diffutils 3.12, patch 2.8, tar 1.35, gzip 1.15, xz 5.8.4, zstd 1.5.7, pkgconf 3.0.10 | `build-core-tools.sh` + `make-package-repo.sh`, served at [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages) | `pkgman add-repo` + `pkgman install`; tar round-trips gzip/xz/zstd |
+| ↳ tier 2 | bzip2 1.0.8, zip 3.0, unzip 6.10c23, nano 9.1, ninja 1.13.2, cmake 4.4.4, libiconv 1.18 | `build-dev-tools.sh` | cmake+ninja+pkg-config build a C++ project; cmake HTTPS downloads; zip keeps BFS attributes; nano edits/saves |
 | **Rust** | 1.101.0-nightly, LLVM 23 | own repo: [aarch64-unknown-haiku](https://github.com/bluevisor/aarch64-unknown-haiku) | native `cargo build` with crates.io deps and proc-macros; `cargo install ripgrep` works |
 
 Built against **hrev60290** (2026-10-21). Binaries are in the
@@ -76,6 +77,7 @@ docker exec haiku-bfs bash /repo/scripts/container/build-python.sh
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-chromium-fixes.sh # system packages rev 2
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-netssl.sh  # openssl3 + rev 3 (pkgman HTTPS)
 docker exec haiku-bfs bash /repo/scripts/container/build-core-tools.sh   # diff/patch/tar/gzip/xz/zstd/pkgconf hpkgs
+docker exec haiku-bfs bash /repo/scripts/container/build-dev-tools.sh    # bzip2/zip/unzip/nano/ninja/cmake/libiconv
 docker exec haiku-bfs bash /repo/scripts/container/make-package-repo.sh  # pkgman repo index
 ```
 

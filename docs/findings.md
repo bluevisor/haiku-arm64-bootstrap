@@ -110,6 +110,58 @@ with `echo yes | pkgman drop-repo <name>`. Run other pkgman commands with
 (diffutils 3.12, gnulib). → Pass `gl_cv_func_strcasecmp_works=yes`.
 Other gnulib run tests in tar, patch and gzip have cross defaults and need nothing.
 
+**ncurses programs fail: `ncurses: cannot initialize terminal type ($TERM="xterm-256color"); exiting`**
+(nano), and `clear` fails too, although `/boot/system/data/terminfo/x/xterm-256color`
+exists. The bootstrap `ncurses6-6.6_bootstrap-1` library has the built-in
+terminfo path `/packages/ncurses6_bootstrap-6.6-1/.self/data/terminfo` (`strings
+libncursesw.so.6.6.0`). packagefs mounts the package as `/packages/ncurses6-6.6_bootstrap-1`,
+so the default lookup always misses. → Set `TERMINFO_DIRS`
+(`scripts/guest/UserSetupEnvironment.snippet` for Terminal; add the same
+variable to sshd's `SetEnv` for ssh). Python's `curses.setupterm()` then sees 256 colors.
+The real fix is an ncurses6 rebuild. A replacement must also sort above
+`6.6_bootstrap`, and plain `6.6` sorts below it.
+
+**Haiku has no iconv.** libroot doesn't provide `iconv_open`, and there's no
+arm64 libiconv package. CMake's bundled libarchive stops with
+`iconv is required, but was not found.` → `libiconv` 1.18 package
+(`build-dev-tools.sh`). The HaikuPorts libiconv patchset only fixes gcc2 builds.
+
+**CMake 4.4 cross-built with its bundled libraries: three Haiku gaps**
+(HaikuPorts avoids all of them by using system curl and libuv):
+- `#error "We cannot compile without socket() support!"` in cmcurl. Its
+  checks add `-lnetwork` only if `HAVE_LIBNETWORK` is set, and nothing tests
+  for it. → `-DHAVE_LIBNETWORK=1`.
+- Link fails with `undefined reference to uv__hrtime` / `uv__fs_event_close` /
+  `uv__process_title_cleanup`. `Utilities/cmlibuv` ships `src/unix/haiku.c`,
+  but its CMakeLists has no Haiku block. → `patches/cmake-4.4.4-cmlibuv-haiku.patch`
+  (upstream libuv's source list: haiku.c, bsd-ifaddrs.c, posix-hrtime.c,
+  posix-poll.c, no-fsevents.c, no-proctitle.c; links bsd + network).
+- `file(DOWNLOAD https://…)` fails with `60;"SSL peer certificate or SSH remote key was not OK"`.
+  A cross build gets no CA bundle, and CMake's trimmed curl has no
+  `CURL_CA_FALLBACK`: `-DCURL_CA_FALLBACK=ON` is accepted but never reaches
+  `curl_config.h`. `cmCurl.cxx` only probes Linux paths. → `patches/cmake-4.4.4-haiku-cafile.patch`
+  adds `/boot/system/data/ssl/CARootCertificates.pem` and its `non-packaged`
+  twin. `SSL_CERT_FILE` also works as a per-run override.
+
+**Smaller cross-build traps in `build-dev-tools.sh`:**
+- ninja's `configure.py` has no Haiku platform, so it's built with CMake.
+  HaikuPorts' patch enables `getloadavg()`, which lives in libbsd, so the link
+  fails until `-DCMAKE_CXX_STANDARD_LIBRARIES=-lbsd`.
+- zip's `unix/configure` runs two `./conftest` programs (uid/gid size, large
+  files). It writes `flags` as one line of `VAR="…"` words and picks up the
+  sysroot's libbz2 into `LFLAGS2`. Edit it in place (`-DLARGE_FILE_SUPPORT`,
+  `LFLAGS2="-lbe …`); an appended `LFLAGS2=` drops `-lbz2` (`undefined reference to BZ2_bzCompress`).
+- unzip 6.10c23 without `-DICONV_MAPPING` also loses `<locale.h>`
+  (`'LC_CTYPE' undeclared`). Add `-DHAVE_LOCALE_H -DHAVE_LANGINFO_H`.
+- bzip2's default `make` target runs its tests with the just-built binary, so
+  build `libbz2.a bzip2 bzip2recover` explicitly.
+- The shared sysroot leaks between builds. Once `build-dev-tools.sh` has put
+  libiconv there, gnulib in tar finds `iconv.h` and the link fails with
+  `undefined reference to libiconv_open`. `build-core-tools.sh` therefore
+  exports `am_cv_func_iconv=no`, which reproduces the published packages.
+- Not a bug: `bzip2 --version` prints its banner and then compresses stdin,
+  so over ssh it hangs. Use `< /dev/null`.
+
 **`pkgman update` can undo the local system packages.** The Haiku repo
 (`haiku/master/arm64/current`) is real and moves with the nightlies. Once it
 serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-3`, and an

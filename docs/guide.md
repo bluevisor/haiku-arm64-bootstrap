@@ -172,7 +172,7 @@ ssh haiku 'pkgman install -y m4 flex'
 `pkgman refresh` still prints `Resource not found` for HaikuPorts, which is
 expected (see findings). Skip `bison`: its arm64 package holds an x86_64 binary.
 
-## 12. Extra packages (diff, patch, tar, gzip, xz, zstd, pkg-config)
+## 12. Extra packages (diff, tar, xz, zstd, zip, nano, cmake, ninja, …)
 
 Prebuilt in the [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages)
 pkgman repository (GitHub Pages). Needs step 11:
@@ -180,15 +180,23 @@ pkgman repository (GitHub Pages). Needs step 11:
 ```sh
 ssh haiku 'pkgman add-repo https://bluevisor.github.io/haiku-arm64-packages'
 ssh haiku 'pkgman install -y diffutils patch tar gzip xz_utils zstd pkgconf'
+ssh haiku 'pkgman install -y bzip2 zip unzip nano ninja cmake'   # + libiconv
 ```
+
+ncurses programs (nano, `clear`) need `TERMINFO_DIRS`: apply
+`scripts/guest/UserSetupEnvironment.snippet` (see findings for why).
 
 To rebuild the packages and the index:
 
 ```sh
-docker exec haiku-bfs bash /repo/scripts/container/build-core-tools.sh  # ~2 min, out/packages
+docker exec haiku-bfs bash /repo/scripts/container/build-core-tools.sh  # ~2 min
+docker exec haiku-bfs bash /repo/scripts/container/build-dev-tools.sh   # ~8 min (cmake)
 docker exec haiku-bfs bash /repo/scripts/container/make-package-repo.sh # out/repo-site
 # copy out/repo-site/ into the haiku-arm64-packages checkout, push; Pages serves it
 ```
+
+Both build scripts share `hpkg-common.sh`. Set `ONLY="cmake"` to rebuild a
+subset of `build-dev-tools.sh`.
 
 `pkgconf` searches `develop/lib/pkgconfig` in the system and home locations.
 The cross-built libraries from steps 7–8 put their `.pc` files in
