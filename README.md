@@ -59,8 +59,8 @@ Built against **hrev60290** (2026-10-21). Binaries are in the
    `scripts/guest/UserBootscript.snippet` to `~/config/settings/boot/UserBootscript`
    (NTP sync at boot + start sshd). The CA bundle ships in the TLS tarball
    at `/boot/system/non-packaged/data/ssl/`.
-7. **Then switch to packages**: install the release's `openssl3` + revision-3
-   `haiku`/`haiku_devel` so `pkgman` has HTTPS ([guide step 11](docs/guide.md#11-pkgman-over-https)),
+7. **Then switch to packages**: install the release's `openssl3` + revision-4
+   `haiku`/`haiku_devel` so `pkgman` has HTTPS and `shutdown -r` resets ([guide step 11](docs/guide.md#11-pkgman-over-https)),
    add the [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages)
    repo, and `pkgman install` curl, git, openssh, python3.12, perl and the
    rest. Then retire the tarball copies ([guide step 13](docs/guide.md#13-from-non-packaged-to-packages)).

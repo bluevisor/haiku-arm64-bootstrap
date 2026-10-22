@@ -173,7 +173,8 @@ ssh haiku 'pkgman install -y m4 flex'
 expected (see findings). Skip `bison`: its arm64 package holds an x86_64 binary.
 
 Then make `shutdown` and `shutdown -r` power off / reset the VM (`haiku`
-revision 4, PSCI; see findings). This is the last reboot that needs UTM:
+revision 4, PSCI; see findings; also in the release, where it replaces rev 3).
+This is the last reboot that needs UTM:
 
 ```sh
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-psci.sh    # ~10 s
