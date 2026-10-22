@@ -198,6 +198,45 @@ docker exec haiku-bfs bash /repo/scripts/container/make-package-repo.sh # out/re
 Both build scripts share `hpkg-common.sh`. Set `ONLY="cmake"` to rebuild a
 subset of `build-dev-tools.sh`.
 
+## 13. From non-packaged to packages
+
+Steps 5–9 installed curl, git, OpenSSH, Python and Perl by hand into
+`/boot/system/non-packaged`, which shadows packages on PATH and the library
+path. The repo now has them as packages, in the HaikuPorts layout:
+- OpenSSL uses `OPENSSLDIR=/boot/system/data/ssl`, and its default CA file is
+  `CARootCertificates.pem` from `ca_root_certificates`.
+- openssh creates its `sshd` privsep user on install.
+
+Snapshot the disk first. Then:
+
+```sh
+ssh haiku 'pkgman install -y ca_root_certificates openssl3 curl git openssh python3.12 perl'
+# sshd: point sftp at the packaged server, add RSA/ECDSA host keys, test on a spare port
+ssh haiku 'sed -i "s|/boot/system/non-packaged/lib/openssh/sftp-server|/boot/system/lib/openssh/sftp-server|" /boot/system/settings/ssh/sshd_config;
+           ssh-keygen -A; /boot/system/bin/sshd -t && /boot/system/bin/sshd -p 2222'
+ssh -p 2222 haiku true   # must work before going on
+# boot script: /boot/system/non-packaged/sbin/sshd -> /boot/system/bin/sshd, then
+# retire the old files (manifests: `tar -tzf` of the release tarballs, see the script)
+scp scripts/guest/retire-nonpackaged.sh haiku:
+ssh -p 2222 haiku 'sh retire-nonpackaged.sh openssh.txt tls.txt python.txt perl.txt'
+# restart the port-22 listener on the packaged sshd (kill the old pid, start /boot/system/bin/sshd)
+```
+
+`retire-nonpackaged.sh` moves files to `~/nonpackaged-retired/<stamp>/`
+instead of deleting them, and leaves `site-packages`/`site_perl` alone. Leftovers:
+- the HTTP/2 rebuild's `libnghttp2` (it isn't in the TLS tarball);
+- the CA files in `non-packaged/data/ssl`;
+- `pip3` launchers and other pip scripts, whose `#!` still names
+  `/boot/system/non-packaged/bin/python3`. Fix them with
+  `python3 -m pip install --force-reinstall --no-deps pip` and a sed for the rest.
+
+Rust (`non-packaged/rust`) stays as it is; cargo and rustc pick up the packaged
+libcurl/libssl, which have the same sonames.
+
+Rebuild the packages with `build-stack.sh`. Perl is native: on the VM run
+`PKG=1 SRCDIR=<fresh patched tree> sh scripts/guest/build-perl-native.sh`, tar
+`/boot/home/perl-pkgroot`, then run `package-perl.sh` in the container.
+
 `pkgconf` searches `develop/lib/pkgconfig` in the system and home locations.
 The cross-built libraries from steps 7–8 put their `.pc` files in
 `/boot/system/non-packaged/lib/pkgconfig`, so set

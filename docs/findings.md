@@ -162,6 +162,47 @@ arm64 libiconv package. CMake's bundled libarchive stops with
 - Not a bug: `bzip2 --version` prints its banner and then compresses stdin,
   so over ssh it hangs. Use `< /dev/null`.
 
+**Packaging the base stack (`build-stack.sh`):**
+- HaikuPorts' OpenSSL patchset changes the default CA *file* to
+  `OPENSSLDIR/CARootCertificates.pem` (not `cert.pem`), and the default cert
+  *dir* to `non-packaged/data/ssl/certs/` via `find_directory`. With
+  `--openssldir=/boot/system/data/ssl` that is exactly what `ca_root_certificates`
+  ships. libbnetapi (`SSL_CTX_set_default_verify_file`), Python, curl and git
+  then share one packaged store. Upstream's `ca_root_certificates` is
+  zstd-compressed and can't activate on arm64, so the repo has a zlib build.
+- Cross `./Configure` without `CC=gcc` looks for `aarch64-unknown-haiku-cc`
+  (`/bin/sh: aarch64-unknown-haiku-cc: not found`, make Error 127).
+- `package create` fails with `License 'Curl' isn't contained in package!`:
+  only Haiku's own license names may be used without shipping the text. Curl,
+  Python, CMake, bzip2, Info-ZIP and `BSD (0-clause)` go in `data/licenses/<name>`.
+- `.PackageInfo` attribute names are hyphenated: `global-writable-files`,
+  `user-settings-files`, `post-install-scripts`. The underscore spelling from
+  the recipes' variables gives `unknown attribute "global_writable_files"`.
+- **sshd's privsep user:** Haiku has one uid-0 account, and its name varies
+  (`baron`, `user`, …). A missing user is fatal for a root sshd
+  (`Privilege separation user sshd does not exist`). HaikuPorts doesn't compile
+  a name in. Their package declares `users { sshd … }` / `groups { sshd }`,
+  and package_daemon creates the account on install (here uid 1000, home in
+  the package's `data/openssh/empty`). This package does the same, so it works
+  whatever the main user is called.
+- OpenSSL's `libssl.pc` has `includedir=${prefix}/include ` with a trailing
+  space, so a `$`-anchored sed misses it.
+- Perl's `-Dman1dir=none -Dman3dir=none` plus `DESTDIR` makes installperl drop
+  a few hundred `*.0` man files into the DESTDIR root. They sit outside
+  `boot/system`, so the package isn't affected.
+- Perl's Config records the build account and host (`cf_email='<user>@<hostname>'`):
+  set `-Dcf_email`/`-Dperladmin` if that matters.
+
+**Switching a live VM from non-packaged to packages** (guide step 13):
+- non-packaged comes first on PATH and the library path, so the packages are
+  invisible until the old files go. The old libcrypto/libssl also hide whether
+  the packaged ones work: test pkgman and Python TLS **after** retiring them.
+- pip launchers (`pip3`, `idna`, …) keep `#!/boot/system/non-packaged/bin/python3`
+  and break silently once that file is gone.
+- A packaged library can't depend on files in non-packaged. In safe mode
+  runtime_loader drops non-packaged from the path, which is why OpenSSL and the
+  CA store are packages.
+
 **`pkgman update` can undo the local system packages.** The Haiku repo
 (`haiku/master/arm64/current`) is real and moves with the nightlies. Once it
 serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-3`, and an

@@ -88,6 +88,9 @@ tidy() {
 		mv "$r"/lib/pkgconfig/*.pc "$r/develop/lib/pkgconfig/"
 		rmdir "$r/lib/pkgconfig"
 		sed -i "s|^libdir=.*|libdir=$S/develop/lib|" "$r"/develop/lib/pkgconfig/*.pc
+		# headers moved to develop/headers (OpenSSL installs to $prefix/include)
+		sed -i -E "s#^includedir=(\\\$\\{prefix\\}|$S)/include[[:space:]]*\$#includedir=$S/develop/headers#" \
+			"$r"/develop/lib/pkgconfig/*.pc
 	fi
 	find "$r" -type f -exec sh -c \
 		'head -c4 "$1" | grep -q "^.ELF" && '$H'-strip --strip-unneeded "$1"' _ {} \;
@@ -109,8 +112,12 @@ to_sysroot() {
 # provides: <name>, cmd: per bin/ entry, lib:/devel: per shared library (at
 # the library's own version, e.g. libpkgconf.so.7.0.0 -> 7.0.0 compat >= 7).
 # requires: haiku, plus lib: for every NEEDED library from another package.
+# Optional env: REV (package revision), ARCH (default arm64; "any" for data),
+# EXTRA_REQUIRES (more requires entries), EXTRA_INFO (raw .PackageInfo text:
+# users, groups, global_writable_files, post_install_scripts, ...).
 package() {
 	local r=$1 name=$2 ver=$3 summary=$4 desc=$5 copy=$6; shift 6
+	local arch=${ARCH:-arm64}
 	local f b so lib libver prov req=() l
 	prov="	$name = $ver compat >= ${ver%%.*}"
 	for f in "$r"/bin/*; do
@@ -130,14 +137,16 @@ package() {
 		for l in $($H-readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(lib[^.]*\)\.so.*\]/\1/p'); do
 			case $l in libroot|libbe|libnetwork|libbnetapi|libbsd|libgnu) continue ;; # haiku
 			esac
-			compgen -G "$r/lib/$l.so.*" >/dev/null && continue # this package
+			# this package (anywhere: libperl.so lives in perl5/.../CORE)
+			[ -n "$(find "$r" -name "$l.so*" -print -quit)" ] && continue
 			req+=("lib:$l")
 		done
 	done < <(find "$r" -type f -print0)
+	req+=(${EXTRA_REQUIRES:-})
 	local licenses=""
 	for l in "$@"; do licenses+=" \"$l\""; done
 	{
-		printf 'name\t\t\t%s\nversion\t\t\t%s-%s\narchitecture\tarm64\n' "$name" "$ver" $REV
+		printf 'name\t\t\t%s\nversion\t\t\t%s-%s\narchitecture\t%s\n' "$name" "$ver" $REV $arch
 		printf 'summary\t\t\t"%s"\ndescription\t\t"%s"\n' "$summary" "$desc"
 		printf 'packager\t\t"haiku-arm64-bootstrap"\nvendor\t\t\t"haiku-arm64-bootstrap"\n'
 		printf 'copyrights\t\t{ "%s" }\nlicenses\t\t{%s }\n' "$copy" "$licenses"
@@ -145,7 +154,8 @@ package() {
 		printf 'requires {\n\thaiku\n'
 		[ ${#req[@]} -eq 0 ] || printf '\t%s\n' $(printf '%s\n' "${req[@]}" | sort -u)
 		printf '}\n'
+		[ -z "${EXTRA_INFO:-}" ] || printf '%s\n' "$EXTRA_INFO"
 	} > "$r/.PackageInfo"
 	cat "$r/.PackageInfo"
-	(cd "$r" && pkgtool create -q -z zlib -i .PackageInfo "$OUT/$name-$ver-$REV-arm64.hpkg")
+	(cd "$r" && pkgtool create -q -z zlib -i .PackageInfo "$OUT/$name-$ver-$REV-$arch.hpkg")
 }
