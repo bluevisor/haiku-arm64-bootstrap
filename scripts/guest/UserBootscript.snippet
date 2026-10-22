@@ -1,0 +1,11 @@
+
+# --- haiku-arm64-bootstrap ---------------------------------------------------
+# Append to ~/config/settings/boot/UserBootscript.
+
+# Start the OpenSSH server (installed under /boot/system/non-packaged).
+/boot/system/non-packaged/sbin/sshd
+
+# Haiku arm64 has no driver for QEMU's RTC, so the clock starts at 1970 every
+# boot and TLS certificate checks fail ("certificate is not yet valid").
+# Sync it over NTP, retrying until the network is up.
+( for i in $(seq 1 24); do /boot/system/preferences/Time --update && break; sleep 5; done ) >/dev/null 2>&1 &

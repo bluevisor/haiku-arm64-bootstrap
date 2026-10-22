@@ -1,0 +1,6 @@
+out/
+*.raw
+*.qcow2
+*.qcow2.bak
+.DS_Store
+__pycache__/
