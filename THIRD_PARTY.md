@@ -7,7 +7,8 @@ to the same release (`sources-*.tar*`), with their SHA-256 in `SHA256SUMS`.
 | Component | Version | License | Patches |
 |---|---|---|---|
 | OpenSSH portable | 10.6p1 | BSD-style (see `LICENCE` in source) | HaikuPorts `openssh-10.6p1.patchset` |
-| OpenSSL | 3.5.9 | Apache-2.0 | new `Configurations/60-haiku-aarch64.conf` (in `build-tls.sh`) |
+| OpenSSL | 3.5.9 | Apache-2.0 | new `Configurations/60-haiku-aarch64.conf` (in `build-tls.sh`); libssl/libcrypto also shipped as the `openssl3-3.5.9-1` hpkg |
+| Haiku system packages (`haiku`, `haiku_devel`, revision 3) | hrev60290 (`ef0d53750b82`, `sources-haiku-hrev60290.tar.xz`) | MIT, parts **LGPL-2.1** | stock packages with three files rebuilt: `kernel_arm64` + `runtime_loader` (`patches/haiku/rchromium-fixes-hrev60290.patch`, rebased from rainygirl/renkuos-rchromium-arm64) and `libbnetapi.so` (`patches/haiku/netapi-local-openssl.patch`) |
 | curl | 8.23.0 | curl (MIT-style) | HaikuPorts `curl-8.23.0.patchset` |
 | git | 2.56.0 | **GPL-2.0** | HaikuPorts `git-2.56.0.patchset` |
 | CPython | 3.12.15 | PSF-2.0 | HaikuPorts `python3.12-3.12.15.patchset`, `fix-nonpackaged-scheme.py`, configure.ac `_host_cpu` fix (in `build-python.sh`) |

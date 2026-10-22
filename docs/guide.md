@@ -154,7 +154,9 @@ step 4 and the HTTP/2 curl from step 7, and over ssh it needs the `SetEnv` from 
 ## 11. pkgman over HTTPS
 
 Builds on step 7 (OpenSSL + CA bundle) and on the revision-2 system packages from
-[chromium.md](chromium.md) (`build-haiku-chromium-fixes.sh`).
+[chromium.md](chromium.md) (`build-haiku-chromium-fixes.sh`). The three
+packages are also in the release (for hrev60290 only), so you can skip the build
+and copy those instead.
 
 ```sh
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-netssl.sh   # ~1 min
