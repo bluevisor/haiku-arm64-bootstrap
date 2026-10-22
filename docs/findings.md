@@ -96,6 +96,20 @@ It exits 16 with no output, and `strace` says `Failed to start 'bison': Bad data
 That's an upstream packaging bug, so don't install it; configure scripts would
 detect a broken bison. m4 and flex from the same set work.
 
+**`package_repo create` rejects mixed vendors**:
+`package 'openssl3' has unexpected vendor 'The OpenSSL Project' (expected 'haiku-arm64-bootstrap')!`.
+Every package in a repository must carry the repository's `vendor`. That's why
+`openssl3-3.5.9-1` stays a release asset rather than going into haiku-arm64-packages.
+
+**`pkgman drop-repo` hangs over ssh.** It waits on an unprinted
+`Really remove the repository …? [yes/no]` prompt (it has no `-y`), so feed it
+with `echo yes | pkgman drop-repo <name>`. Run other pkgman commands with
+`-y … < /dev/null` so a prompt can't block.
+
+**Cross configure: `checking whether strcasecmp works... cannot run test program while cross compiling`**
+(diffutils 3.12, gnulib). → Pass `gl_cv_func_strcasecmp_works=yes`.
+Other gnulib run tests in tar, patch and gzip have cross defaults and need nothing.
+
 **`pkgman update` can undo the local system packages.** The Haiku repo
 (`haiku/master/arm64/current`) is real and moves with the nightlies. Once it
 serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-3`, and an

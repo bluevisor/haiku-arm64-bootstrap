@@ -171,3 +171,26 @@ ssh haiku 'pkgman install -y m4 flex'
 
 `pkgman refresh` still prints `Resource not found` for HaikuPorts, which is
 expected (see findings). Skip `bison`: its arm64 package holds an x86_64 binary.
+
+## 12. Extra packages (diff, patch, tar, gzip, xz, zstd, pkg-config)
+
+Prebuilt in the [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages)
+pkgman repository (GitHub Pages). Needs step 11:
+
+```sh
+ssh haiku 'pkgman add-repo https://bluevisor.github.io/haiku-arm64-packages'
+ssh haiku 'pkgman install -y diffutils patch tar gzip xz_utils zstd pkgconf'
+```
+
+To rebuild the packages and the index:
+
+```sh
+docker exec haiku-bfs bash /repo/scripts/container/build-core-tools.sh  # ~2 min, out/packages
+docker exec haiku-bfs bash /repo/scripts/container/make-package-repo.sh # out/repo-site
+# copy out/repo-site/ into the haiku-arm64-packages checkout, push; Pages serves it
+```
+
+`pkgconf` searches `develop/lib/pkgconfig` in the system and home locations.
+The cross-built libraries from steps 7–8 put their `.pc` files in
+`/boot/system/non-packaged/lib/pkgconfig`, so set
+`PKG_CONFIG_PATH=/boot/system/non-packaged/lib/pkgconfig` to use them.
