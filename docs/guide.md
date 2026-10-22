@@ -170,7 +170,7 @@ ssh haiku 'pkgman install -y m4 flex'
 ```
 
 `pkgman refresh` still prints `Resource not found` for HaikuPorts, which is
-expected (see findings). Skip `bison`: its arm64 package holds an x86_64 binary.
+expected, and stops there: refresh other repos by name (see findings). Skip `bison`: its arm64 package holds an x86_64 binary.
 
 Then make `shutdown` and `shutdown -r` power off / reset the VM (`haiku`
 revision 4, PSCI; see findings; also in the release, where it replaces rev 3).
@@ -185,6 +185,17 @@ ssh haiku 'grep PSCI /var/log/syslog'   # arm64: PSCI shutdown/reboot via hvc
 ssh haiku 'shutdown -r'                  # comes back by itself
 ```
 
+Revision 5 adds two TCP fixes on top (see findings): a connection that both
+sides closed reads as end-of-file instead of `ENOTCONN`, and accepted sockets
+poll readable once closed. Without them every graceful Node.js http2 close
+hangs. Also in the release:
+
+```sh
+docker exec haiku-bfs bash /repo/scripts/container/build-haiku-tcp.sh     # ~1 min
+scp out/haiku-system/*-5-arm64.hpkg haiku:/boot/home/stage/
+ssh haiku 'cd /boot/home/stage && pkgman install -y ./haiku-*-5-arm64.hpkg ./haiku_devel-*-5-arm64.hpkg && shutdown -r'
+```
+
 ## 12. Extra packages (diff, tar, xz, zstd, zip, nano, cmake, ninja, …)
 
 Prebuilt in the [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages)
@@ -192,6 +203,8 @@ pkgman repository (GitHub Pages). Needs step 11:
 
 ```sh
 ssh haiku 'pkgman add-repo https://bluevisor.github.io/haiku-arm64-packages'
+# later, to see new packages (a plain refresh stops at HaikuPorts' error):
+ssh haiku 'pkgman refresh haiku-arm64-bootstrap'
 ssh haiku 'pkgman install -y diffutils patch tar gzip xz_utils zstd pkgconf'
 ssh haiku 'pkgman install -y bzip2 zip unzip nano ninja cmake'   # + libiconv
 ssh haiku 'pkgman install -y ncurses6'   # 6.6_release: fixes the bootstrap's terminfo path

@@ -62,13 +62,34 @@ QEMU virt's arm64 FADT is hardware-reduced and has neither.
 
 ## Haiku arm64 system
 
-**TCP panic on an sshd socket close (seen once, 8 vCPUs).** `PANIC: bound endpoint
+**TCP panic on an sshd socket close (seen twice, 8 vCPUs).** `PANIC: bound endpoint
 0x… not in hash!` in `EndpointManager::Unbind(TCPEndpoint*)` ← `~TCPEndpoint` ←
 `tcp_uninit_protocol` ← `socket_free` ← `close_fd_index`, from sshd's listener
 `main` closing a socket right after an incoming connection, a few seconds after
-boot. It didn't happen again in ~10 later connections and reboots. It looks like
-an SMP race in the TCP add-on (it's untouched by the local patches). If you see
-`Host is down` with UTM still `started`, read the serial log for it.
+boot. Both times the host was retrying `ssh` every few seconds while the VM
+booted; other reboots were fine. It looks like an SMP race in the
+TCP add-on's bind/unbind (code the local patches don't touch). If you see
+`Host is down` with UTM still `started`, read the serial console: `co` at the
+`kdebug>` prompt continues, and the system keeps running.
+
+**A TCP connection that both sides closed doesn't read as end-of-file.** Two
+bugs in `TCPEndpoint.cpp`, found through Node's http2 tests (~130 hung until
+the 360 s timeout):
+- Client `write(); shutdown(SHUT_WR)`, server reads then shuts down too: once
+  the client ACKs the server's FIN (LAST_ACK) the endpoint is CLOSED, and
+  `ReadData()` returns `ENOTCONN` for CLOSED even though the peer's FIN arrived.
+  Node: `Error: read ENOTCONN` on the server socket. Linux returns 0 there.
+- Endpoints created by `accept()` never get `FLAG_CAN_NOTIFY` (only `connect()`
+  and `listen()` set it), so after a simultaneous close (CLOSING/TIME_WAIT)
+  `_AvailableData()` returns 0 and the socket never polls readable. The
+  `connect()` side sees EOF and the accepted side waits forever: an http2
+  server's socket emits `finish` but never `end`, and the process never exits.
+→ `patches/haiku/tcp-eof-after-close.patch`, `build-haiku-tcp.sh` (`haiku`
+revision 5, guide step 11): remember that a FIN arrived and read CLOSED like
+TIME_WAIT (queued data, then 0); set `FLAG_CAN_NOTIFY` in `_Spawn()`.
+Resets and never-connected sockets behave as before. To try a kernel add-on
+without repacking `haiku`, put it under `/boot/system/non-packaged/add-ons/kernel/…`:
+the module loader searches non-packaged before the system add-ons.
 
 **Clock starts at 1970 every boot.** There's no driver for QEMU's PL031 RTC.
 Symptom: `SSL certificate OpenSSL verify result: certificate is not yet valid (9)`.
@@ -112,8 +133,11 @@ no `repo` file of its own. pkgman builds download URLs from the config's
 `baseurl`, not from the cached index's `base-url`. → In
 `/boot/system/settings/package-repositories/HaikuPorts` set
 `baseurl=https://eu.hpkg.haiku-os.org/haikuports/master/build-packages`.
-`pkgman refresh` then reports `Resource not found` for HaikuPorts. That's harmless:
-the cached index stays and `pkgman install` downloads and verifies checksums.
+`pkgman refresh` then reports `Resource not found` for HaikuPorts. The cached
+index stays and `pkgman install` downloads and verifies checksums, but **the
+refresh stops there (exit 5): repositories listed after HaikuPorts are never
+refreshed**, so new packages in an added repo stay invisible. Refresh that one
+by name: `pkgman refresh haiku-arm64-bootstrap`.
 
 **The `bison-3.8.2_bootstrap-1` arm64 package contains an x86_64 Linux binary**
 (`readelf -l`: interpreter `/lib64/ld-linux-x86-64.so.2`, `NEEDED libc.so.6`).
@@ -244,9 +268,9 @@ arm64 libiconv package. CMake's bundled libarchive stops with
 
 **`pkgman update` can undo the local system packages.** The Haiku repo
 (`haiku/master/arm64/current`) is real and moves with the nightlies. Once it
-serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-4`, and an
-update would install the stock package again, without TLS, PSCI shutdown or the
-Chromium fixes.
+serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-5`, and an
+update would install the stock package again, without TLS, PSCI shutdown, the TCP
+fixes or the Chromium fixes.
 `rchromium` requires `haiku_rchromium_fixes`, so the solver should balk, but
 check the plan before saying yes. To move to a newer hrev, rebuild the system
 packages from it.
@@ -444,6 +468,17 @@ its worker loop swallows the `IOError`, so with stdin from `/dev/null` it runs
 **A test that "hangs" with no output** has often crashed: debug_server holds the
 team and waits for a desktop dialog (syslog: `Thread N entered the debugger:
 Segment violation`). `kill -9` the team.
+
+**`test/parallel` results** (`tools/test.py -j8 --mode=release parallel`, 4,507
+tests): on `haiku` rev 4, 4,159 pass (322 of them skipped) and 348 fail, 221 of
+those by timeout. On rev 5 (the TCP fixes above), 4,366 pass and 141 fail
+(25 timeouts): 208 fixed, 191 of them http2, net, tls and http. What's left is mostly Haiku
+limits: no hard links on BFS (`link` → EPERM), no `fs.watch` in libuv's Haiku
+port (ENOSYS), no `/dev/stdin`, plus some inspector, dgram and cluster cases.
+`test-child-process-fork-getconnections` is flaky on both revisions (5/20 vs
+12/20 failures): the server's `close` only fires when the child answers before
+`child.kill()` lands. With one extra log line it fails 7/8 on rev 4 too, so it
+is a teardown timing race, not the TCP change.
 
 **npm -g**: packagefs is read-only, so the package's builtin
 `lib/node_modules/npm/npmrc` sets `prefix=/boot/system/non-packaged`; global
