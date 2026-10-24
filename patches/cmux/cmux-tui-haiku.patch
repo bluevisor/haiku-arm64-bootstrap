@@ -1,0 +1,263 @@
+diff --git a/cmux-tui/Cargo.toml b/cmux-tui/Cargo.toml
+index 0b7b9dc..49cdde0 100644
+--- a/cmux-tui/Cargo.toml
++++ b/cmux-tui/Cargo.toml
+@@ -165,6 +165,8 @@ zeroize = { version = "1", features = ["derive"] }
+ # text while parsing CSI-u input. cmux needs those fields to preserve keyboard
+ # layouts across its shortcut layer and nested terminals.
+ crossterm = { path = "vendor/crossterm" }
++# Haiku: no CLOCK_BOOTTIME (its CLOCK_MONOTONIC counts from boot).
++boringtun = { path = "../patched/boringtun-0.7.1" }
+ # The cmux Crossterm patch adds `Event::EnhancedKey`. Keep the adapter's
+ # exhaustive event mapping in the same source-controlled compatibility layer.
+ terminput-crossterm = { path = "vendor/terminput-crossterm" }
+diff --git a/cmux-tui/crates/cmux-pty/src/macos.rs b/cmux-tui/crates/cmux-pty/src/macos.rs
+index aafef36..0b5c6e8 100644
+--- a/cmux-tui/crates/cmux-pty/src/macos.rs
++++ b/cmux-tui/crates/cmux-pty/src/macos.rs
+@@ -12,7 +12,8 @@ use anyhow::{Context, bail};
+ 
+ use super::{Child, MasterPty, PtyCommand, PtyOpenError, PtySize};
+ 
+-#[cfg(target_vendor = "apple")]
++// The libc crate has no ptsname_r binding for these.
++#[cfg(any(target_vendor = "apple", target_os = "haiku"))]
+ unsafe extern "C" {
+     fn ptsname_r(
+         descriptor: libc::c_int,
+@@ -94,7 +95,7 @@ fn pty_slave_name(descriptor: RawFd) -> anyhow::Result<CString> {
+     }
+ }
+ 
+-#[cfg(target_vendor = "apple")]
++#[cfg(any(target_vendor = "apple", target_os = "haiku"))]
+ fn platform_ptsname_r(descriptor: RawFd, buffer: *mut libc::c_char, length: usize) -> libc::c_int {
+     unsafe { ptsname_r(descriptor, buffer, length) }
+ }
+@@ -109,7 +110,8 @@ fn ptsname_error(_status: libc::c_int) -> io::Error {
+     io::Error::last_os_error()
+ }
+ 
+-#[cfg(target_os = "linux")]
++// glibc and Haiku return the error number instead of setting errno.
++#[cfg(any(target_os = "linux", target_os = "haiku"))]
+ fn ptsname_error(status: libc::c_int) -> io::Error {
+     io::Error::from_raw_os_error(status)
+ }
+diff --git a/cmux-tui/crates/cmux-tui-core/src/image_paste_file.rs b/cmux-tui/crates/cmux-tui-core/src/image_paste_file.rs
+index 1187cfd..c85f866 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/image_paste_file.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/image_paste_file.rs
+@@ -194,13 +194,18 @@ impl ImagePasteFile {
+         }
+         // fstatat initialized current on success.
+         let current = unsafe { current.assume_init() };
+-        // Darwin's dev_t is signed 32-bit; MetadataExt exposes it as u64.
+-        #[cfg(target_vendor = "apple")]
++        // Darwin's and Haiku's dev_t is signed 32-bit and Haiku's ino_t signed
++        // 64-bit; MetadataExt exposes both as u64.
++        #[cfg(any(target_vendor = "apple", target_os = "haiku"))]
+         let current_device = current.st_dev as u64;
+-        #[cfg(not(target_vendor = "apple"))]
++        #[cfg(not(any(target_vendor = "apple", target_os = "haiku")))]
+         let current_device = current.st_dev;
++        #[cfg(target_os = "haiku")]
++        let current_inode = current.st_ino as u64;
++        #[cfg(not(target_os = "haiku"))]
++        let current_inode = current.st_ino;
+         if current_device == owned.dev()
+-            && current.st_ino == owned.ino()
++            && current_inode == owned.ino()
+             && current.st_mode & libc::S_IFMT == libc::S_IFREG
+         {
+             EntryOwnership::Owned
+diff --git a/cmux-tui/crates/cmux-tui-core/src/platform.rs b/cmux-tui/crates/cmux-tui-core/src/platform.rs
+index 43b8be5..760be1f 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/platform.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/platform.rs
+@@ -195,7 +195,8 @@ pub fn require_unix_peer_uid(
+     Ok(())
+ }
+ 
+-#[cfg(any(target_os = "linux", target_os = "android"))]
++// Haiku has the same SO_PEERCRED/struct ucred as Linux.
++#[cfg(any(target_os = "linux", target_os = "android", target_os = "haiku"))]
+ fn peer_uid_of(fd: std::os::fd::RawFd) -> io::Result<u32> {
+     use std::mem::{size_of, zeroed};
+ 
+@@ -243,6 +244,7 @@ fn peer_uid_of(fd: std::os::fd::RawFd) -> io::Result<u32> {
+     not(any(
+         target_os = "linux",
+         target_os = "android",
++        target_os = "haiku",
+         target_vendor = "apple",
+         target_os = "freebsd",
+         target_os = "dragonfly",
+diff --git a/cmux-tui/crates/cmux-tui-core/src/terminal_host_runtime.rs b/cmux-tui/crates/cmux-tui-core/src/terminal_host_runtime.rs
+index 8c91c5c..a7a156f 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/terminal_host_runtime.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/terminal_host_runtime.rs
+@@ -2016,6 +2016,22 @@ mod unix {
+     /// hidden host starts any threads or opens its endpoint. This runs inside
+     /// the freshly exec'd `__terminal-host`, so descriptor enumeration is
+     /// race-free and cannot affect the daemon's own open files.
++    #[cfg(target_os = "haiku")]
++    fn open_descriptors_by_probing() -> Vec<libc::c_int> {
++        // SAFETY: rlimit is plain data and all-zero is a valid value.
++        let mut limit = unsafe { std::mem::zeroed::<libc::rlimit>() };
++        // SAFETY: the out-pointer is valid for one rlimit.
++        let max = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == 0 {
++            limit.rlim_cur.min(65_536) as libc::c_int
++        } else {
++            1024
++        };
++        // SAFETY: F_GETFD only reads this process's descriptor table.
++        ((libc::STDERR_FILENO + 1)..max)
++            .filter(|&descriptor| unsafe { libc::fcntl(descriptor, libc::F_GETFD) } != -1)
++            .collect()
++    }
++
+     pub fn isolate_terminal_host_process_fds() -> anyhow::Result<()> {
+         let mut last_error = None;
+         let mut inherited = None;
+@@ -2035,6 +2051,11 @@ mod unix {
+                 Err(error) => last_error = Some(error),
+             }
+         }
++        // Haiku has neither /proc nor /dev/fd: probe the descriptor numbers.
++        #[cfg(target_os = "haiku")]
++        if inherited.is_none() {
++            inherited = Some(open_descriptors_by_probing());
++        }
+         let descriptors = inherited.ok_or_else(|| {
+             anyhow::anyhow!(
+                 "enumerate inherited terminal-host descriptors: {}",
+@@ -3030,6 +3051,18 @@ mod unix {
+         }
+     }
+ 
++    // Haiku has neither renameat2 nor renamex_np, and BFS has no hard links
++    // for a link+unlink, so check for the target first. A writer that creates
++    // the same path between the check and the rename gets overwritten.
++    #[cfg(target_os = "haiku")]
++    fn rename_no_replace(from: &Path, to: &Path) -> std_io::Result<()> {
++        match fs::symlink_metadata(to) {
++            Ok(_) => Err(std_io::Error::from(std_io::ErrorKind::AlreadyExists)),
++            Err(error) if error.kind() == std_io::ErrorKind::NotFound => fs::rename(from, to),
++            Err(error) => Err(error),
++        }
++    }
++
+     #[cfg(any(target_os = "linux", target_os = "android"))]
+     fn rename_no_replace(from: &Path, to: &Path) -> std_io::Result<()> {
+         let from = CString::new(from.as_os_str().as_bytes()).map_err(|_| {
+diff --git a/cmux-tui/crates/cmux-tui-core/src/unix_process_scope.rs b/cmux-tui/crates/cmux-tui-core/src/unix_process_scope.rs
+index c9dd1de..d1cad00 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/unix_process_scope.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/unix_process_scope.rs
+@@ -922,13 +922,17 @@ fn file_marker_for_fd(fd: libc::c_int) -> io::Result<FileMarker> {
+     }
+     // SAFETY: fstat(2) initialized the structure after returning success.
+     let stat = unsafe { stat.assume_init() };
+-    // `st_dev` is a signed 32-bit `dev_t` on every Apple target and a `u64`
+-    // elsewhere.
+-    #[cfg(target_vendor = "apple")]
++    // `st_dev` is a signed 32-bit `dev_t` on every Apple target and on Haiku,
++    // and a `u64` elsewhere; Haiku's `ino_t` is signed 64-bit.
++    #[cfg(any(target_vendor = "apple", target_os = "haiku"))]
+     let device = u64::try_from(stat.st_dev)
+         .map_err(|_| io::Error::other("file marker device is out of range"))?;
+-    #[cfg(not(target_vendor = "apple"))]
++    #[cfg(not(any(target_vendor = "apple", target_os = "haiku")))]
+     let device = stat.st_dev;
++    #[cfg(target_os = "haiku")]
++    let inode = u64::try_from(stat.st_ino)
++        .map_err(|_| io::Error::other("file marker inode is out of range"))?;
++    #[cfg(not(target_os = "haiku"))]
+     let inode = stat.st_ino;
+     Ok(FileMarker { device, inode })
+ }
+diff --git a/cmux-tui/crates/cmux-tui-core/src/workspace_registry.rs b/cmux-tui/crates/cmux-tui-core/src/workspace_registry.rs
+index 262e455..1b73e9e 100644
+--- a/cmux-tui/crates/cmux-tui-core/src/workspace_registry.rs
++++ b/cmux-tui/crates/cmux-tui-core/src/workspace_registry.rs
+@@ -2084,7 +2084,12 @@ fn reset_stat_device(stat: &libc::stat) -> u64 {
+ 
+ #[cfg(unix)]
+ fn reset_stat_inode(stat: &libc::stat) -> u64 {
+-    stat.st_ino
++    // Haiku's ino_t is signed 64-bit; inode numbers are never negative.
++    #[cfg(target_os = "haiku")]
++    let inode = stat.st_ino as u64;
++    #[cfg(not(target_os = "haiku"))]
++    let inode = stat.st_ino;
++    inode
+ }
+ 
+ #[cfg(not(unix))]
+diff --git a/cmux-tui/crates/ghostty-vt-sys/build.rs b/cmux-tui/crates/ghostty-vt-sys/build.rs
+index 661e278..1677ebb 100644
+--- a/cmux-tui/crates/ghostty-vt-sys/build.rs
++++ b/cmux-tui/crates/ghostty-vt-sys/build.rs
+@@ -6,6 +6,21 @@ fn main() {
+     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+ 
++    // CMUX_GHOSTTY_VT_PREBUILT=<dir> links <dir>/lib/libghostty-vt.a and uses
++    // <dir>/bindings.rs instead of running zig and bindgen, for hosts that
++    // have neither (a native aarch64-unknown-haiku build: zig cross-compiles
++    // the library for `aarch64-haiku`, bindgen runs on the cross host).
++    println!("cargo:rerun-if-env-changed=CMUX_GHOSTTY_VT_PREBUILT");
++    if let Ok(prebuilt) = env::var("CMUX_GHOSTTY_VT_PREBUILT") {
++        let prebuilt = PathBuf::from(prebuilt);
++        emit_cargo_path_directive("rerun-if-changed", &prebuilt);
++        emit_cargo_path_directive("rustc-link-search=native", &prebuilt.join("lib"));
++        println!("cargo:rustc-link-lib=static=ghostty-vt");
++        std::fs::copy(prebuilt.join("bindings.rs"), out_dir.join("bindings.rs"))
++            .unwrap_or_else(|e| panic!("failed to copy prebuilt bindings.rs: {e}"));
++        return;
++    }
++
+     // The ghostty submodule at the cmux repo root is the default source.
+     // CMUX_GHOSTTY_SRC overrides it for out-of-tree builds.
+     let ghostty_dir = match env::var("CMUX_GHOSTTY_SRC") {
+@@ -159,6 +174,7 @@ fn zig_target_for_rust_target(target: &str) -> Option<&'static str> {
+         "aarch64-unknown-linux-gnu" => Some("aarch64-linux-gnu"),
+         "x86_64-unknown-linux-musl" => Some("x86_64-linux-musl"),
+         "aarch64-unknown-linux-musl" => Some("aarch64-linux-musl"),
++        "aarch64-unknown-haiku" => Some("aarch64-haiku"),
+         _ => None,
+     }
+ }
+diff --git a/cmux-tui/vendor/crossterm/src/event/source/unix/mio.rs b/cmux-tui/vendor/crossterm/src/event/source/unix/mio.rs
+index 6d19e0c..64ff857 100644
+--- a/cmux-tui/vendor/crossterm/src/event/source/unix/mio.rs
++++ b/cmux-tui/vendor/crossterm/src/event/source/unix/mio.rs
+@@ -73,6 +73,17 @@ impl EventSource for UnixInternalEventSource {
+         let timeout = PollTimeout::new(timeout);
+ 
+         loop {
++            // Mio's poll(2) backend drops an fd's interest once it fires and
++            // only re-arms it from its own I/O wrappers, which `SourceFd` and
++            // the signal pipe bypass. Re-arm both before every poll.
++            #[cfg(target_os = "haiku")]
++            {
++                let registry = self.poll.registry();
++                let tty_raw_fd = self.tty_fd.raw_fd();
++                registry.reregister(&mut SourceFd(&tty_raw_fd), TTY_TOKEN, Interest::READABLE)?;
++                registry.reregister(&mut self.signals, SIGNAL_TOKEN, Interest::READABLE)?;
++            }
++
+             if let Err(e) = self.poll.poll(&mut self.events, timeout.leftover()) {
+                 // Mio will throw an interrupted error in case of cursor position retrieval. We need to retry until it succeeds.
+                 // Previous versions of Mio (< 0.7) would automatically retry the poll call if it was interrupted (if EINTR was returned).
+@@ -111,6 +122,9 @@ impl EventSource for UnixInternalEventSource {
+                                     else if e.kind() == io::ErrorKind::Interrupted {
+                                         continue;
+                                     }
++                                    // A closed terminal fails every read: report it
++                                    // instead of spinning on it.
++                                    return Err(e);
+                                 }
+                             };
+ 

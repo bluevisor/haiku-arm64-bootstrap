@@ -1,0 +1,29 @@
+--- a/lib/std/Io/Threaded.zig	2026-04-13 11:50:15
++++ b/lib/std/Io/Threaded.zig	2026-10-22 17:18:30
+@@ -5345,7 +5345,7 @@
+                     .NOMEM => return error.SystemResources,
+                     .NOTDIR => return error.NotDir,
+                     .PERM => return error.PermissionDenied,
+-                    .BUSY => return error.DeviceBusy,
++                    .BUSY => return error.SystemResources,
+                     else => |err| return posix.unexpectedErrno(err),
+                 }
+             },
+@@ -9846,7 +9846,7 @@
+ 
+     const syscall: Syscall = try .start();
+     while (true) {
+-        const rc = posix.pread(file.handle, dest[0].ptr, @intCast(dest[0].len), @bitCast(offset));
++        const rc = pread_sym(file.handle, dest[0].base, dest[0].len, @bitCast(offset));
+         switch (posix.errno(rc)) {
+             .SUCCESS => {
+                 syscall.finish();
+@@ -14063,7 +14063,7 @@
+             .dgram => posix.SOCK.DGRAM,
+             .seqpacket => posix.SOCK.SEQPACKET,
+             .raw => posix.SOCK.RAW,
+-            .rdm => posix.SOCK.RDM,
++            .rdm => if (native_os == .haiku) return error.ProtocolUnsupportedBySystem else posix.SOCK.RDM,
+         },
+         if (protocol) |p| @intFromEnum(p) else if (is_windows) switch (family) {
+             posix.AF.UNIX => switch (mode) {

@@ -1,0 +1,24 @@
+diff --git a/pkg/simdutf/build.zig b/pkg/simdutf/build.zig
+index a92fa3a..952a524 100644
+--- a/pkg/simdutf/build.zig
++++ b/pkg/simdutf/build.zig
+@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) !void {
+         }),
+         .linkage = .static,
+     });
++    if (target.result.os.tag == .haiku) lib.setLibCFile(.{ .cwd_relative = "/private/tmp/claude-501/-Users-johnzheng-Downloads/0bb60b29-ec1d-460d-9bcc-8e65fcebbc73/scratchpad/haiku-libc.txt" });
+     lib.root_module.addIncludePath(b.path("vendor"));
+ 
+     if (target.result.os.tag.isDarwin()) {
+diff --git a/src/build/GhosttyLibVt.zig b/src/build/GhosttyLibVt.zig
+index 32ed2aa..8c250d7 100644
+--- a/src/build/GhosttyLibVt.zig
++++ b/src/build/GhosttyLibVt.zig
+@@ -214,6 +214,7 @@ fn initLib(
+         .root_module = zig.vt_c,
+         .version = zig.version,
+     });
++    if (target.result.os.tag == .haiku) lib.setLibCFile(.{ .cwd_relative = "/private/tmp/claude-501/-Users-johnzheng-Downloads/0bb60b29-ec1d-460d-9bcc-8e65fcebbc73/scratchpad/haiku-libc.txt" });
+     lib.installHeadersDirectory(
+         b.path("include/ghostty"),
+         "ghostty",

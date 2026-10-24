@@ -1,0 +1,22 @@
+diff -ru /boot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/boringtun-0.7.1/src/sleepyinstant/unix.rs patched/boringtun-0.7.1/src/sleepyinstant/unix.rs
+--- /boot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/boringtun-0.7.1/src/sleepyinstant/unix.rs	2006-07-24 01:21:28.000000000 +0000
++++ patched/boringtun-0.7.1/src/sleepyinstant/unix.rs	2026-10-23 00:32:00.210763776 +0000
+@@ -7,14 +7,16 @@
+     target_os = "macos",
+     target_os = "ios",
+     target_os = "tvos",
+-    target_os = "freebsd"
++    target_os = "freebsd",
++    target_os = "haiku"
+ ))]
+ const CLOCK_ID: ClockId = ClockId::CLOCK_MONOTONIC;
+ #[cfg(not(any(
+     target_os = "macos",
+     target_os = "ios",
+     target_os = "tvos",
+-    target_os = "freebsd"
++    target_os = "freebsd",
++    target_os = "haiku"
+ )))]
+ const CLOCK_ID: ClockId = ClockId::CLOCK_BOOTTIME;
+ 
