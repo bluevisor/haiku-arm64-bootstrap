@@ -27,6 +27,7 @@ take it from there to:
 | **Natural scrolling** | `haiku` rev 6 | `scripts/container/build-haiku-natscroll.sh`: a "Natural scrolling" check box for mice in Input preferences, on by default (input_server + mouse/tablet add-ons) | a Mac trackpad scrolls the VM the same way as macOS |
 | **Dark mode switch** | `haiku` rev 7 | `scripts/container/build-haiku-darkmode.sh`: a "Dark mode" check box in Appearance > Colors that swaps in Haiku's built-in dark color set | one click between light and dark; the desktop color stays |
 | **Mouse wheel in terminal apps** | `haiku` rev 8 | `scripts/container/build-haiku-wheel.sh`: Terminal sends wheel events to apps that turned on mouse reporting, instead of three Up/Down arrow keys per step | the wheel scrolls panes in cmux, vim and htop instead of walking through shell history |
+| **Shift+Tab in terminal apps** | `haiku` rev 9 | `scripts/container/build-haiku-backtab.sh`: Terminal sends xterm's back-tab (`ESC [ Z`) for Shift+Tab instead of a plain Tab, so TUIs and shells can tell them apart | Haiku Code's Shift+Tab permission cycling works |
 | **pkgman repo** | diffutils 3.12, patch 2.8, tar 1.35, gzip 1.15, xz 5.8.4, zstd 1.5.7, pkgconf 3.0.10 | `build-core-tools.sh` + `make-package-repo.sh`, served at [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages) | `pkgman add-repo` + `pkgman install`; tar round-trips gzip/xz/zstd |
 | ↳ tier 2 | bzip2 1.0.8, zip 3.0, unzip 6.10c23, nano 9.1, ninja 1.13.2, cmake 4.4.4, libiconv 1.18, make 4.4.1_release | `build-dev-tools.sh`, `build-make.sh` | cmake+ninja+pkg-config build a C++ project; cmake HTTPS downloads; zip keeps BFS attributes; nano edits/saves |
 | ↳ base stack | openssl3 3.5.9 rev 2, ca_root_certificates, nghttp2, curl, git, openssh, sqlite, python3.12 (+bz2/lzma/sqlite3), perl, ncurses6 6.6_release | `build-stack.sh`, `package-perl.sh` | replaces the `non-packaged` installs; pkgman, pip, cargo, git, curl and cmake all verify TLS against the packaged CA store |
@@ -65,8 +66,8 @@ Built against **hrev60290** (2026-10-21). Binaries are in the
    `scripts/guest/UserBootscript.snippet` to `~/config/settings/boot/UserBootscript`
    (NTP sync at boot + start sshd). The CA bundle ships in the TLS tarball
    at `/boot/system/non-packaged/data/ssl/`.
-7. **Then switch to packages**: install the release's `openssl3` + revision-8
-   `haiku`/`haiku_devel` so `pkgman` has HTTPS, `shutdown -r` resets, closed TCP connections read EOF, mice scroll naturally, Appearance has a dark mode switch and the wheel works in terminal apps ([guide step 11](docs/guide.md#11-pkgman-over-https)),
+7. **Then switch to packages**: install the release's `openssl3` + revision-9
+   `haiku`/`haiku_devel` so `pkgman` has HTTPS, `shutdown -r` resets, closed TCP connections read EOF, mice scroll naturally, Appearance has a dark mode switch, and the wheel and Shift+Tab work in terminal apps ([guide step 11](docs/guide.md#11-pkgman-over-https)),
    add the [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages)
    repo, and `pkgman install` curl, git, openssh, python3.12, perl and the
    rest. Then retire the tarball copies ([guide step 13](docs/guide.md#13-from-non-packaged-to-packages)).
@@ -94,6 +95,7 @@ docker exec haiku-bfs bash /repo/scripts/container/build-haiku-tcp.sh     # rev 
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-natscroll.sh # rev 6 (natural scrolling for mice)
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-darkmode.sh  # rev 7 (dark mode switch in Appearance)
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-wheel.sh     # rev 8 (mouse wheel in terminal apps)
+docker exec haiku-bfs bash /repo/scripts/container/build-haiku-backtab.sh   # rev 9 (Shift+Tab in terminal apps)
 docker exec haiku-bfs bash /repo/scripts/container/build-core-tools.sh   # diff/patch/tar/gzip/xz/zstd/pkgconf hpkgs
 docker exec haiku-bfs bash /repo/scripts/container/build-dev-tools.sh    # bzip2/zip/unzip/nano/ninja/cmake/libiconv
 docker exec haiku-bfs bash /repo/scripts/container/build-stack.sh        # openssl3/curl/git/openssh/python3.12/...

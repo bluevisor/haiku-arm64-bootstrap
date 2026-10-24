@@ -1,0 +1,18 @@
+diff --git a/src/apps/terminal/TermViewStates.cpp b/src/apps/terminal/TermViewStates.cpp
+index eb090577..2bd91ffc 100644
+--- a/src/apps/terminal/TermViewStates.cpp
++++ b/src/apps/terminal/TermViewStates.cpp
+@@ -320,6 +320,13 @@ TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
+ 		prefix = "\033O"; // SS3, 7-bit encoding.
+ 
+ 	switch (*bytes) {
++		case B_TAB:
++			// xterm sends back-tab (CSI Z) for Shift+Tab; without it the app
++			// gets a plain Tab and cannot tell the two apart.
++			if ((mod & B_SHIFT_KEY) != 0)
++				toWrite = "\033[Z";
++			break;
++
+ 		case B_RETURN:
+ 			if (rawChar == B_RETURN)
+ 				toWrite = fView->TextBuffer()->IsMode(MODE_LINEFEED_NEWLINE) ? "\r\n" : "\r";

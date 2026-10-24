@@ -61,6 +61,17 @@ rev 8 sends xterm's wheel buttons 4/5 (`ESC[<64;x;yM` / `ESC[<65;x;yM`, or the
 legacy encoding) while mouse reporting is on; without it, nothing changes:
 `patches/haiku/terminal-mouse-wheel.patch`, `build-haiku-wheel.sh`.
 
+**Shift+Tab arrives as a plain Tab.** `TermView::DefaultState::KeyDown` has no
+case for `B_TAB`, so Terminal writes the bare `\t` whatever the modifiers, and
+TUIs can't bind Shift+Tab (Haiku Code's permission cycling fell back to
+Ctrl+P). → `haiku` rev 9 sends xterm's back-tab, `ESC [ Z`:
+`patches/haiku/terminal-shift-tab.patch`, `build-haiku-backtab.sh`.
+
+**`/repo` in the `haiku-bfs` container is a copy, not a bind mount.** A new
+script written to the host checkout isn't visible in the container, and a
+patch written to `/repo` inside it never reaches the host. `docker cp` both
+ways.
+
 **`pkgman` installs can wait for the next boot.** After a `haiku` install
 reports "A reboot is necessary", later installs in the same boot are queued
 too, and a package whose files are in use isn't swapped live either.
@@ -305,7 +316,7 @@ arm64 libiconv package. CMake's bundled libarchive stops with
 
 **`pkgman update` can undo the local system packages.** The Haiku repo
 (`haiku/master/arm64/current`) is real and moves with the nightlies. Once it
-serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-8`, and an
+serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-9`, and an
 update would install the stock package again, without TLS, PSCI shutdown, the TCP
 fixes, natural scrolling, the dark mode switch, the Terminal wheel fix or the
 Chromium fixes.

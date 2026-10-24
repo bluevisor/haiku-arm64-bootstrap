@@ -229,6 +229,16 @@ scp out/haiku-system/*-8-arm64.hpkg haiku:/boot/home/stage/
 ssh haiku 'cd /boot/home/stage && pkgman install -y ./haiku-*-8-arm64.hpkg ./haiku_devel-*-8-arm64.hpkg && shutdown -r'
 ```
 
+Revision 9 makes **Shift+Tab** reach terminal apps. Terminal passed it
+through as a plain Tab byte, so no app could tell the two apart; it now sends
+xterm's back-tab (`ESC [ Z`). Only the Terminal app changes:
+
+```sh
+docker exec haiku-bfs bash /repo/scripts/container/build-haiku-backtab.sh   # ~1 min
+scp out/haiku-system/*-9-arm64.hpkg haiku:/boot/home/stage/
+ssh haiku 'cd /boot/home/stage && pkgman install -y ./haiku-*-9-arm64.hpkg ./haiku_devel-*-9-arm64.hpkg && shutdown -r'
+```
+
 ## 12. Extra packages (diff, tar, xz, zstd, zip, nano, cmake, ninja, …)
 
 Prebuilt in the [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages)
