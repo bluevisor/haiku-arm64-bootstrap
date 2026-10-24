@@ -96,6 +96,8 @@ docker exec haiku-bfs bash /repo/scripts/container/build-haiku-natscroll.sh # re
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-darkmode.sh  # rev 7 (dark mode switch in Appearance)
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-wheel.sh     # rev 8 (mouse wheel in terminal apps)
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-backtab.sh   # rev 9 (Shift+Tab in terminal apps)
+# newer hrev: all of the above in one pass, from patches/haiku-hrevN (rev 2 of that hrev)
+docker exec -e HREV_NUM=60295 haiku-bfs bash /build/build-haiku-system.sh # copy patches + script into /build first
 docker exec haiku-bfs bash /repo/scripts/container/build-core-tools.sh   # diff/patch/tar/gzip/xz/zstd/pkgconf hpkgs
 docker exec haiku-bfs bash /repo/scripts/container/build-dev-tools.sh    # bzip2/zip/unzip/nano/ninja/cmake/libiconv
 docker exec haiku-bfs bash /repo/scripts/container/build-stack.sh        # openssl3/curl/git/openssh/python3.12/...

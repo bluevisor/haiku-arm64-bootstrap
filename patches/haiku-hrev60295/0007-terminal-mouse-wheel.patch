@@ -1,0 +1,87 @@
+From e5476fac266d44bdfcec28f26e3c86de4abbb5c9 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Sat, 24 Oct 2026 15:46:41 -0700
+Subject: [PATCH] terminal-mouse-wheel.patch
+
+---
+ src/apps/terminal/TermView.cpp | 43 +++++++++++++++++++++++++++++++++-
+ src/apps/terminal/TermView.h   |  2 ++
+ 2 files changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/src/apps/terminal/TermView.cpp b/src/apps/terminal/TermView.cpp
+index e09e7cae..004cbf35 100644
+--- a/src/apps/terminal/TermView.cpp
++++ b/src/apps/terminal/TermView.cpp
+@@ -1838,7 +1838,18 @@ TermView::MessageReceived(BMessage *message)
+ 			// mode
+ 			BAutolock locker(fTextBuffer);
+ 			float deltaY = 0;
+-			if (fTextBuffer->IsAlternateScreenActive()
++			if ((fTextBuffer->IsMode(MODE_REPORT_NORMAL_MOUSE_EVENT)
++						|| fTextBuffer->IsMode(MODE_REPORT_BUTTON_MOUSE_EVENT)
++						|| fTextBuffer->IsMode(MODE_REPORT_ANY_MOUSE_EVENT))
++				&& message->FindFloat("be:wheel_delta_y", &deltaY) == B_OK
++				&& deltaY != 0) {
++				// The application tracks the mouse: report the wheel as mouse
++				// buttons 4 and 5, like xterm, instead of faking arrow keys.
++				bool extendedCoordinates
++					= fTextBuffer->IsMode(MODE_EXTENDED_MOUSE_COORDINATES);
++				locker.Unlock();
++				_SendMouseWheelEvent(deltaY, extendedCoordinates);
++			} else if (fTextBuffer->IsAlternateScreenActive()
+ 				&& message->FindFloat("be:wheel_delta_y", &deltaY) == B_OK
+ 				&& deltaY != 0) {
+ 				// We are in alternative screen mode and have a vertical delta
+@@ -2572,6 +2583,36 @@ TermView::_SendMouseEvent(int32 buttons, int32 mode, int32 x, int32 y,
+ }
+ 
+ 
++void
++TermView::_SendMouseWheelEvent(float deltaY, bool extendedCoordinates)
++{
++	BPoint where;
++	uint32 buttons;
++	GetMouse(&where, &buttons, false);
++	TermPos pos = _ConvertToTerminal(where);
++
++	// one press of button 4 (up) or 5 (down) per step; wheels never release
++	int32 xtermButton = deltaY < 0 ? 64 : 65;
++	int32 steps = std::max(1, abs((int)deltaY));
++
++	BString event;
++	if (extendedCoordinates) {
++		event.SetToFormat("\033[<%" B_PRId32 ";%" B_PRId32 ";%" B_PRId32 "M",
++			xtermButton, pos.x + 1, pos.y + 1);
++	} else {
++		const char legacy[6] = { '\033', '[', 'M', (char)(32 + xtermButton),
++			(char)(pos.x + 1 + 32), (char)(pos.y + 1 + 32) };
++		event.SetTo(legacy, sizeof(legacy));
++	}
++
++	// a single write(), like the arrow key emulation
++	BString toWrite;
++	for (int32 i = 0; i < steps; i++)
++		toWrite << event;
++	fShell->Write(toWrite.String(), toWrite.Length());
++}
++
++
+ void
+ TermView::MouseDown(BPoint where)
+ {
+diff --git a/src/apps/terminal/TermView.h b/src/apps/terminal/TermView.h
+index 83918183..9ec58047 100644
+--- a/src/apps/terminal/TermView.h
++++ b/src/apps/terminal/TermView.h
+@@ -262,6 +262,8 @@ private:
+ 			void				_SendMouseEvent(int32 button, int32 mode,
+ 									int32 x, int32 y, bool motion,
+ 									bool upEvent = false);
++			void				_SendMouseWheelEvent(float deltaY,
++									bool extendedCoordinates);
+ 
+ 			void				_DrawInlineMethodString();
+ 			void				_HandleInputMethodChanged(BMessage* message);
+-- 
+2.54.0 (Apple Git-157)
+

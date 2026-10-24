@@ -1,0 +1,24 @@
+From 27b69ead1ae8fde5ff37d7b179138006a094c1d7 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Sat, 24 Oct 2026 15:47:39 -0700
+Subject: [PATCH] sniffer-rpattern-cstddef.patch
+
+---
+ src/kits/storage/sniffer/RPattern.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/kits/storage/sniffer/RPattern.cpp b/src/kits/storage/sniffer/RPattern.cpp
+index 814f369e..665ca7ec 100644
+--- a/src/kits/storage/sniffer/RPattern.cpp
++++ b/src/kits/storage/sniffer/RPattern.cpp
+@@ -15,6 +15,7 @@
+ #include "RPattern.h"
+ #include "Range.h"
+ #include "Data.h"
++#include <cstddef>
+ 
+ using namespace BPrivate::Storage::Sniffer;
+ 
+-- 
+2.54.0 (Apple Git-157)
+

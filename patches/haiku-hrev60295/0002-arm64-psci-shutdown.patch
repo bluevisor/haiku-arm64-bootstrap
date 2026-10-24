@@ -1,0 +1,110 @@
+From df1ab3c4121b2b93f20eaf5a6477d1bfadd68378 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Sat, 24 Oct 2026 15:46:40 -0700
+Subject: [PATCH] arm64-psci-shutdown.patch
+
+---
+ src/system/kernel/arch/arm64/arch_cpu.cpp | 64 ++++++++++++++++++++++-
+ 1 file changed, 63 insertions(+), 1 deletion(-)
+
+diff --git a/src/system/kernel/arch/arm64/arch_cpu.cpp b/src/system/kernel/arch/arm64/arch_cpu.cpp
+index 643dc98c..7ae9dc10 100644
+--- a/src/system/kernel/arch/arm64/arch_cpu.cpp
++++ b/src/system/kernel/arch/arm64/arch_cpu.cpp
+@@ -6,15 +6,70 @@
+ 
+ #include <KernelExport.h>
+ 
++#include <ACPI.h>
+ #include <arch/cpu.h>
+ #include <boot/kernel_args.h>
+ #include <commpage.h>
+ #include <elf.h>
+ 
++#include "acpi.h"
++
++
++#define PSCI_SYSTEM_OFF		0x84000008UL
++#define PSCI_SYSTEM_RESET	0x84000009UL
++
+ 
+ extern "C" void _exception_vectors(void);
+ 
+ 
++enum class PsciConduit {
++	None,
++	Smc,
++	Hvc
++};
++
++
++static PsciConduit sPsciConduit = PsciConduit::None;
++
++
++static void
++arm64_psci_detect_conduit()
++{
++	acpi_module_info* acpi;
++	if (get_module(B_ACPI_MODULE_NAME, (module_info**)&acpi) != B_OK)
++		return;
++
++	ACPI_TABLE_FADT* fadt;
++	if (acpi->get_table(ACPI_SIG_FADT, 0, (void**)&fadt) == B_OK
++		&& fadt->Header.Length >= offsetof(ACPI_TABLE_FADT, MinorRevision)
++		&& (fadt->ArmBootFlags & ACPI_FADT_PSCI_COMPLIANT) != 0) {
++		sPsciConduit = (fadt->ArmBootFlags & ACPI_FADT_PSCI_USE_HVC) != 0
++			? PsciConduit::Hvc : PsciConduit::Smc;
++		dprintf("arm64: PSCI shutdown/reboot via %s\n",
++			sPsciConduit == PsciConduit::Hvc ? "hvc" : "smc");
++	}
++
++	put_module(B_ACPI_MODULE_NAME);
++}
++
++
++static uint64
++arm64_psci_call(uint64 function)
++{
++	register uint64 x0 asm("x0") = function;
++	if (sPsciConduit == PsciConduit::Hvc) {
++		asm volatile("hvc #0" : "+r" (x0) : : "x1", "x2", "x3", "x4", "x5",
++			"x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
++			"x16", "x17", "memory");
++	} else {
++		asm volatile("smc #0" : "+r" (x0) : : "x1", "x2", "x3", "x4", "x5",
++			"x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
++			"x16", "x17", "memory");
++	}
++	return x0;
++}
++
++
+ status_t
+ arch_cpu_preboot_init_percpu(kernel_args *args, int curr_cpu)
+ {
+@@ -70,6 +125,9 @@ arch_cpu_init_post_vm(kernel_args *args)
+ status_t
+ arch_cpu_init_post_modules(kernel_args *args)
+ {
++	// Look the conduit up now: the KDL reboot command cannot load modules.
++	// TODO: also handle the /psci node when booted from a device tree.
++	arm64_psci_detect_conduit();
+ 	return B_OK;
+ }
+ 
+@@ -77,7 +135,11 @@ arch_cpu_init_post_modules(kernel_args *args)
+ status_t
+ arch_cpu_shutdown(bool reboot)
+ {
+-	// never reached
++	if (sPsciConduit == PsciConduit::None)
++		return B_NOT_SUPPORTED;
++
++	// SYSTEM_OFF and SYSTEM_RESET only return on failure
++	arm64_psci_call(reboot ? PSCI_SYSTEM_RESET : PSCI_SYSTEM_OFF);
+ 	return B_ERROR;
+ }
+ 
+-- 
+2.54.0 (Apple Git-157)
+

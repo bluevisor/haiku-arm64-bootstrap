@@ -1,0 +1,2117 @@
+From aca6ad1b25e5030a456120f246a8003c9369a729 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Sat, 24 Oct 2026 15:46:41 -0700
+Subject: [PATCH] haiku-virtio_gpu-3d.diff
+
+---
+ .../private/graphics/virtio/virtio_gpu_3d.h   |  157 ++
+ .../kernel/drivers/graphics/virtio/viogpu.h   |   20 +-
+ .../drivers/graphics/virtio/virtio_gpu.cpp    | 1635 +++++++++++++++--
+ 3 files changed, 1695 insertions(+), 117 deletions(-)
+ create mode 100644 headers/private/graphics/virtio/virtio_gpu_3d.h
+
+diff --git a/headers/private/graphics/virtio/virtio_gpu_3d.h b/headers/private/graphics/virtio/virtio_gpu_3d.h
+new file mode 100644
+index 00000000..da0df530
+--- /dev/null
++++ b/headers/private/graphics/virtio/virtio_gpu_3d.h
+@@ -0,0 +1,157 @@
++/*
++ * Copyright 2026, Haiku, Inc. All Rights Reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef VIRTIO_GPU_3D_H
++#define VIRTIO_GPU_3D_H
++
++
++#include <Drivers.h>
++
++
++/*
++ * 3D interface of the virtio_gpu driver. Besides the display device under
++ * /dev/graphics, the driver publishes a render node per GPU in
++ * VIRTIO_GPU_RENDER_DEVICE_DIR. It follows the Linux virtgpu DRM uAPI, so
++ * that Mesa's virtgpu backends (Venus) port with few changes: every open
++ * file gets at most one context, buffer handles are per file, and the structs
++ * have the layout of their drm_virtgpu_* counterparts where the semantics
++ * match. The differences:
++ *
++ *  - GETPARAM returns the value in the struct instead of through a pointer.
++ *  - MAP maps the blob into the calling team and returns its address; there
++ *    is no mmap() on the device. UNMAP removes that mapping again.
++ *  - EXECBUFFER returns a fence id instead of a sync_file fd. Another open of
++ *    the render node bound to that id with FENCE_BIND becomes readable
++ *    (select()/poll()) once the fence has signaled, which stands in for the
++ *    sync_file.
++ */
++
++#define VIRTIO_GPU_RENDER_DEVICE_DIR	"/dev/misc/virtio_gpu"
++
++
++enum {
++	VIRTIO_GPU_3D_GETPARAM = B_DEVICE_OP_CODES_END + 0x100,
++	VIRTIO_GPU_3D_GET_CAPS,
++	VIRTIO_GPU_3D_CONTEXT_INIT,
++	VIRTIO_GPU_3D_RESOURCE_CREATE_BLOB,
++	VIRTIO_GPU_3D_RESOURCE_INFO,
++	VIRTIO_GPU_3D_MAP,
++	VIRTIO_GPU_3D_UNMAP,
++	VIRTIO_GPU_3D_CLOSE_HANDLE,
++	VIRTIO_GPU_3D_EXECBUFFER,
++	VIRTIO_GPU_3D_FENCE_BIND,
++	VIRTIO_GPU_3D_FENCE_WAIT,
++};
++
++
++/* GETPARAM, same values as Linux's VIRTGPU_PARAM_* */
++#define VIRTIO_GPU_3D_PARAM_3D_FEATURES				1
++#define VIRTIO_GPU_3D_PARAM_CAPSET_QUERY_FIX		2
++#define VIRTIO_GPU_3D_PARAM_RESOURCE_BLOB			3
++#define VIRTIO_GPU_3D_PARAM_HOST_VISIBLE			4
++#define VIRTIO_GPU_3D_PARAM_CROSS_DEVICE			5
++#define VIRTIO_GPU_3D_PARAM_CONTEXT_INIT			6
++#define VIRTIO_GPU_3D_PARAM_SUPPORTED_CAPSET_IDS	7
++#define VIRTIO_GPU_3D_PARAM_EXPLICIT_DEBUG_NAME		8
++#define VIRTIO_GPU_3D_PARAM_BLOB_ALIGNMENT			9
++
++struct virtio_gpu_3d_getparam {
++	uint64	param;
++	uint64	value;			/* out */
++};
++
++/* GET_CAPS */
++#define VIRTIO_GPU_3D_CAPSET_VIRGL		1
++#define VIRTIO_GPU_3D_CAPSET_VIRGL2		2
++#define VIRTIO_GPU_3D_CAPSET_VENUS		4
++#define VIRTIO_GPU_3D_CAPSET_DRM		6
++
++struct virtio_gpu_3d_get_caps {
++	uint32	cap_set_id;
++	uint32	cap_set_ver;
++	uint64	addr;			/* buffer for the capset data */
++	uint32	size;
++	uint32	pad;
++};
++
++/* CONTEXT_INIT */
++#define VIRTIO_GPU_3D_CONTEXT_PARAM_CAPSET_ID		1
++#define VIRTIO_GPU_3D_CONTEXT_PARAM_NUM_RINGS		2
++#define VIRTIO_GPU_3D_CONTEXT_PARAM_POLL_RINGS_MASK	3
++#define VIRTIO_GPU_3D_CONTEXT_PARAM_DEBUG_NAME		4
++
++struct virtio_gpu_3d_context_set_param {
++	uint64	param;
++	uint64	value;
++};
++
++struct virtio_gpu_3d_context_init {
++	uint32	num_params;
++	uint32	pad;
++	uint64	ctx_set_params;	/* array of virtio_gpu_3d_context_set_param */
++};
++
++/* RESOURCE_CREATE_BLOB */
++#define VIRTIO_GPU_3D_BLOB_MEM_GUEST			0x0001
++#define VIRTIO_GPU_3D_BLOB_MEM_HOST3D			0x0002
++#define VIRTIO_GPU_3D_BLOB_MEM_HOST3D_GUEST		0x0003
++
++#define VIRTIO_GPU_3D_BLOB_FLAG_USE_MAPPABLE	0x0001
++#define VIRTIO_GPU_3D_BLOB_FLAG_USE_SHAREABLE	0x0002
++#define VIRTIO_GPU_3D_BLOB_FLAG_USE_CROSS_DEVICE	0x0004
++
++struct virtio_gpu_3d_resource_create_blob {
++	uint32	blob_mem;
++	uint32	blob_flags;
++	uint32	bo_handle;		/* out */
++	uint32	res_handle;		/* out */
++	uint64	size;			/* a multiple of PARAM_BLOB_ALIGNMENT */
++	uint32	pad;
++	uint32	cmd_size;
++	uint64	cmd;			/* submitted to the context before the create */
++	uint64	blob_id;
++};
++
++/* RESOURCE_INFO */
++struct virtio_gpu_3d_resource_info {
++	uint32	bo_handle;
++	uint32	res_handle;		/* out */
++	uint32	size;			/* out */
++	uint32	blob_mem;		/* out */
++};
++
++/* MAP */
++struct virtio_gpu_3d_map {
++	uint32	handle;
++	int32	area;			/* out */
++	uint64	address;		/* out */
++};
++
++/* UNMAP, CLOSE_HANDLE */
++struct virtio_gpu_3d_handle {
++	uint32	handle;
++	uint32	pad;
++};
++
++/* EXECBUFFER */
++#define VIRTIO_GPU_3D_EXECBUF_FENCE		0x01	/* return a fence id */
++#define VIRTIO_GPU_3D_EXECBUF_RING_IDX	0x02	/* fence on ring_idx's timeline */
++
++struct virtio_gpu_3d_execbuffer {
++	uint32	flags;
++	uint32	size;
++	uint64	command;
++	uint32	ring_idx;
++	uint32	pad;
++	uint64	fence_id;		/* out, 0 without EXECBUF_FENCE */
++};
++
++/* FENCE_BIND, FENCE_WAIT */
++struct virtio_gpu_3d_fence {
++	uint64	fence_id;
++	int64	timeout;		/* FENCE_WAIT only: microseconds, < 0 waits forever */
++};
++
++
++#endif	/* VIRTIO_GPU_3D_H */
+diff --git a/src/add-ons/kernel/drivers/graphics/virtio/viogpu.h b/src/add-ons/kernel/drivers/graphics/virtio/viogpu.h
+index a00d991d..4bcfe06c 100644
+--- a/src/add-ons/kernel/drivers/graphics/virtio/viogpu.h
++++ b/src/add-ons/kernel/drivers/graphics/virtio/viogpu.h
+@@ -65,6 +65,11 @@
+  * VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB
+  */
+ #define VIRTIO_GPU_F_RESOURCE_BLOB       (1ULL << 3)
++/*
++ * VIRTIO_GPU_CMD_CREATE_CONTEXT with
++ * context_init and multiple timelines
++ */
++#define VIRTIO_GPU_F_CONTEXT_INIT        (1ULL << 4)
+ 
+ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_UNDEFINED = 0,
+@@ -129,13 +134,19 @@ enum virtio_gpu_shm_id {
+ };
+ 
+ #define VIRTIO_GPU_FLAG_FENCE (1 << 0)
++/*
++ * If the following flag is set, then ring_idx contains the index
++ * of the command ring that needs to used when creating the fence
++ */
++#define VIRTIO_GPU_FLAG_INFO_RING_IDX (1 << 1)
+ 
+ struct virtio_gpu_ctrl_hdr {
+ 	__le32 type;
+ 	__le32 flags;
+ 	__le64 fence_id;
+ 	__le32 ctx_id;
+-	__le32 padding;
++	__u8 ring_idx;
++	__u8 padding[3];
+ } _PACKED;
+ 
+ /* data passed in the cursor vq */
+@@ -275,10 +286,11 @@ struct virtio_gpu_resource_create_3d {
+ } _PACKED;
+ 
+ /* VIRTIO_GPU_CMD_CTX_CREATE */
++#define VIRTIO_GPU_CONTEXT_INIT_CAPSET_ID_MASK 0x000000ff
+ struct virtio_gpu_ctx_create {
+ 	struct virtio_gpu_ctrl_hdr hdr;
+ 	__le32 nlen;
+-	__le32 padding;
++	__le32 context_init;
+ 	char debug_name[64];
+ } _PACKED;
+ 
+@@ -303,6 +315,10 @@ struct virtio_gpu_cmd_submit {
+ 
+ #define VIRTIO_GPU_CAPSET_VIRGL 1
+ #define VIRTIO_GPU_CAPSET_VIRGL2 2
++#define VIRTIO_GPU_CAPSET_GFXSTREAM_VULKAN 3
++#define VIRTIO_GPU_CAPSET_VENUS 4
++#define VIRTIO_GPU_CAPSET_CROSS_DOMAIN 5
++#define VIRTIO_GPU_CAPSET_DRM 6
+ 
+ /* VIRTIO_GPU_CMD_GET_CAPSET_INFO */
+ struct virtio_gpu_get_capset_info {
+diff --git a/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp b/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
+index 20d17dbc..c81d8a54 100644
+--- a/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
++++ b/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
+@@ -8,37 +8,99 @@
+ 
+ #include <graphic_driver.h>
+ 
++#include <bus/PCI.h>
++#include <condition_variable.h>
++#include <fs/select_sync_pool.h>
++#include <kernel.h>
+ #include <lock.h>
++#include <team.h>
+ #include <virtio.h>
++#include <virtio_gpu_3d.h>
+ #include <virtio_info.h>
++#include <vm/vm.h>
+ 
+ #include <util/AutoLock.h>
++#include <util/DoublyLinkedList.h>
+ 
+ #include "viogpu.h"
+ 
+ 
+ #define VIRTIO_GPU_DRIVER_MODULE_NAME "drivers/graphics/virtio_gpu/driver_v1"
+ #define VIRTIO_GPU_DEVICE_MODULE_NAME "drivers/graphics/virtio_gpu/device_v1"
++#define VIRTIO_GPU_RENDER_MODULE_NAME "drivers/graphics/virtio_gpu/render_v1"
+ #define VIRTIO_GPU_DEVICE_ID_GENERATOR	"virtio_gpu/device_id"
+ 
++// virtio PCI capability for shared memory regions (virtio 1.2, 4.1.4.7)
++#define VIRTIO_PCI_CAP_SHARED_MEMORY_CFG	8
++
++// Blob sizes and their offsets in the host-visible region are multiples of
++// this, so that hosts with 16 KiB pages (macOS on Apple silicon) can map them.
++#define VIRTIO_GPU_BLOB_ALIGNMENT	(16 * 1024)
++#define VIRTIO_GPU_MAX_COMMAND_SIZE	(512 * 1024)
++#define VIRTIO_GPU_MAX_CAPSETS		8
++#define VIRTIO_GPU_MAX_RINGS		64
++// The display resources count up from 1; keep the 3D ones well apart.
++#define VIRTIO_GPU_FIRST_3D_RESOURCE_ID	0x100000
++#define VIRTIO_GPU_COMMAND_TIMEOUT	10000000
++
++
++struct virtio_gpu_request : DoublyLinkedListLinkImpl<virtio_gpu_request> {
++	uint8*		buffer;			// the command, followed by its response
++	size_t		commandSize;
++	size_t		responseSize;
++	uint64		fenceId;		// tracked fence, 0 if none
++	bool		done;
++	bool		async;			// freed by the completion thread
++};
+ 
+-typedef struct {
++typedef DoublyLinkedList<virtio_gpu_request> RequestList;
++
++
++struct virtio_gpu_capset {
++	uint32		id;
++	uint32		maxVersion;
++	uint32		maxSize;
++};
++
++
++struct virtio_gpu_hostmem_range
++	: DoublyLinkedListLinkImpl<virtio_gpu_hostmem_range> {
++	uint64		offset;
++	uint64		size;
++};
++
++typedef DoublyLinkedList<virtio_gpu_hostmem_range> HostmemRangeList;
++
++
++struct virtio_gpu_render_file;
++typedef DoublyLinkedList<virtio_gpu_render_file> RenderFileList;
++
++
++struct virtio_gpu_driver_info {
+ 	device_node*			node;
+ 	::virtio_device			virtio_device;
+ 	virtio_device_interface*	virtio;
+ 
+ 	uint64 					features;
++	int32					initCount;
+ 
+ 	::virtio_queue			controlQueue;
+-	mutex					commandLock;
+-	area_id					commandArea;
+-	addr_t					commandBuffer;
+-	phys_addr_t				commandPhysAddr;
+-	sem_id					commandDone;
+-	uint64					fenceId;
+-
+ 	::virtio_queue			cursorQueue;
+ 
++	// Requests in flight on the control queue. A completion thread hands
++	// out their responses; fenced 3D submissions stay in pendingFences until
++	// the host signals them.
++	mutex					requestLock;
++	ConditionVariable		requestCondition;
++	RequestList				pendingFences;
++	RenderFileList			selectingFiles;
++	uint64					lastFenceId;
++	sem_id					completionSem;
++	thread_id				completionThread;
++
++	// serializes the display commands
++	mutex					commandLock;
++
+ 	int						displayResourceId;
+ 	uint32					framebufferWidth;
+ 	uint32					framebufferHeight;
+@@ -53,7 +115,19 @@ typedef struct {
+ 
+ 	area_id					sharedArea;
+ 	virtio_gpu_shared_info* sharedInfo;
+-} virtio_gpu_driver_info;
++
++	// 3D
++	uint32					capsetCount;
++	virtio_gpu_capset		capsets[VIRTIO_GPU_MAX_CAPSETS];
++	int32					nextContextId;
++	int32					nextResourceId;
++
++	// the host-visible shared memory region that blobs get mapped into
++	phys_addr_t				hostmemBase;
++	uint64					hostmemSize;
++	mutex					hostmemLock;
++	HostmemRangeList		hostmemRanges;
++};
+ 
+ 
+ typedef struct {
+@@ -61,6 +135,40 @@ typedef struct {
+ } virtio_gpu_handle;
+ 
+ 
++struct virtio_gpu_blob {
++	uint32					resourceId;
++	uint32					blobMem;
++	uint32					blobFlags;
++	uint64					size;
++
++	bool					hostMapped;
++	uint64					hostOffset;
++	uint32					mapInfo;
++
++	area_id					area;		// mapping in the client team
++	team_id					team;
++	void*					address;
++};
++
++
++struct virtio_gpu_render_file
++	: DoublyLinkedListLinkImpl<virtio_gpu_render_file> {
++	virtio_gpu_driver_info*	info;
++
++	mutex					lock;
++	uint32					contextId;
++	uint32					capsetId;
++	virtio_gpu_blob**		blobs;		// indexed by handle - 1
++	uint32					blobCapacity;
++
++	// a file bound to a fence becomes readable once it signals
++	bool					fenceBound;
++	uint64					fenceId;
++	select_sync_pool*		selectPool;
++	bool					selecting;
++};
++
++
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+@@ -83,6 +191,7 @@ typedef struct {
+ 
+ 
+ static device_manager_info* sDeviceManager;
++static mutex sInitLock = MUTEX_INITIALIZER("virtio_gpu init");
+ 
+ 
+ static void virtio_gpu_vqwait(void* driverCookie, void* cookie);
+@@ -100,61 +209,261 @@ get_feature_name(uint64 feature)
+ 			return "res_uuid";
+ 		case VIRTIO_GPU_F_RESOURCE_BLOB:
+ 			return "res_blob";
++		case VIRTIO_GPU_F_CONTEXT_INIT:
++			return "context_init";
+ 	}
+ 	return NULL;
+ }
+ 
+ 
+-static status_t
+-virtio_gpu_drain_queues(virtio_gpu_driver_info* info)
++//	#pragma mark - control queue
++
++
++static virtio_gpu_request*
++virtio_gpu_request_create(size_t commandSize, size_t responseSize)
+ {
+-	while (info->virtio->queue_dequeue(info->controlQueue, NULL, NULL))
+-		;
++	virtio_gpu_request* request = new(std::nothrow) virtio_gpu_request;
++	if (request == NULL)
++		return NULL;
++
++	request->buffer = (uint8*)malloc(commandSize + responseSize);
++	if (request->buffer == NULL) {
++		delete request;
++		return NULL;
++	}
++	memset(request->buffer, 0, commandSize + responseSize);
++
++	request->commandSize = commandSize;
++	request->responseSize = responseSize;
++	request->fenceId = 0;
++	request->done = false;
++	request->async = false;
++	return request;
++}
+ 
+-	while (info->virtio->queue_dequeue(info->cursorQueue, NULL, NULL))
+-		;
+ 
+-	return B_OK;
++static void
++virtio_gpu_request_delete(virtio_gpu_request* request)
++{
++	free(request->buffer);
++	delete request;
+ }
+ 
+ 
+-status_t
+-virtio_gpu_send_cmd(virtio_gpu_driver_info* info, void *cmd, size_t cmdSize, void *response,
+-    size_t responseSize)
++static inline virtio_gpu_ctrl_hdr*
++virtio_gpu_request_header(virtio_gpu_request* request)
+ {
+-	struct virtio_gpu_ctrl_hdr *hdr = (struct virtio_gpu_ctrl_hdr *)info->commandBuffer;
+-	struct virtio_gpu_ctrl_hdr *responseHdr = (struct virtio_gpu_ctrl_hdr *)response;
++	return (virtio_gpu_ctrl_hdr*)request->buffer;
++}
+ 
+-	memcpy((void*)info->commandBuffer, cmd, cmdSize);
+-	memset((void*)(info->commandBuffer + cmdSize), 0, responseSize);
+-	hdr->flags |= VIRTIO_GPU_FLAG_FENCE;
+-	hdr->fence_id = ++info->fenceId;
+ 
+-	physical_entry entries[] {
+-		{ info->commandPhysAddr, cmdSize },
+-		{ info->commandPhysAddr + cmdSize, responseSize },
+-	};
+-	if (!info->virtio->queue_is_empty(info->controlQueue))
+-		return B_ERROR;
++static inline virtio_gpu_ctrl_hdr*
++virtio_gpu_request_response(virtio_gpu_request* request)
++{
++	return (virtio_gpu_ctrl_hdr*)(request->buffer + request->commandSize);
++}
++
++
++/*!	Puts \a request on the control queue, waiting for room if it is full.
++	A fenced request gets the next fence id here, so that fence ids are
++	increasing in queue order, as the host expects.
++	Must be called with the requestLock held.
++*/
++static status_t
++virtio_gpu_queue_request_locked(virtio_gpu_driver_info* info,
++	virtio_gpu_request* request, bigtime_t deadline)
++{
++	uint32 maxEntries = (request->commandSize + request->responseSize)
++		/ B_PAGE_SIZE + 4;
++	physical_entry* entries = (physical_entry*)malloc(
++		sizeof(physical_entry) * maxEntries);
++	if (entries == NULL)
++		return B_NO_MEMORY;
++
++	uint32 commandCount = maxEntries;
++	status_t status = get_memory_map_etc(B_SYSTEM_TEAM, request->buffer,
++		request->commandSize, entries, &commandCount);
++	uint32 responseCount = maxEntries - commandCount;
++	if (status == B_OK) {
++		status = get_memory_map_etc(B_SYSTEM_TEAM,
++			request->buffer + request->commandSize, request->responseSize,
++			entries + commandCount, &responseCount);
++	}
++	if (status != B_OK) {
++		free(entries);
++		return status;
++	}
++
++	virtio_gpu_ctrl_hdr* header = virtio_gpu_request_header(request);
++	bool fenced = (header->flags & VIRTIO_GPU_FLAG_FENCE) != 0;
++	if (request->fenceId != 0)
++		info->pendingFences.Add(request);
++
++	while (true) {
++		// Waiting for room drops the lock, so the id is taken right before
++		// each attempt to keep ids increasing in queue order.
++		if (fenced) {
++			header->fence_id = ++info->lastFenceId;
++			if (request->fenceId != 0)
++				request->fenceId = header->fence_id;
++		}
++
++		status = info->virtio->queue_request_v(info->controlQueue, entries,
++			commandCount, responseCount, request);
++		if (status != B_BUSY)
++			break;
++
++		// The queue is full; completions make room.
++		status = info->requestCondition.Wait(&info->requestLock,
++			B_ABSOLUTE_TIMEOUT, deadline);
++		if (status == B_TIMED_OUT) {
++			// not queued, so unlike a response timeout the caller keeps it
++			status = B_BUSY;
++			break;
++		}
++	}
++	free(entries);
++
++	if (status != B_OK && request->fenceId != 0)
++		info->pendingFences.Remove(request);
++	return status;
++}
++
++
++/*!	Sends \a request and waits for its response. If that times out, the
++	request is left to the completion thread and B_TIMED_OUT is returned;
++	the caller must not touch it anymore. In all other cases the caller
++	owns the request.
++*/
++static status_t
++virtio_gpu_send_request(virtio_gpu_driver_info* info,
++	virtio_gpu_request* request)
++{
++	bigtime_t deadline = system_time() + VIRTIO_GPU_COMMAND_TIMEOUT;
+ 
+-	status_t status = info->virtio->queue_request_v(info->controlQueue, entries, 1, 1, NULL);
++	MutexLocker locker(info->requestLock);
++	status_t status = virtio_gpu_queue_request_locked(info, request, deadline);
+ 	if (status != B_OK)
+ 		return status;
+ 
+-	acquire_sem(info->commandDone);
++	while (!request->done) {
++		status = info->requestCondition.Wait(&info->requestLock,
++			B_ABSOLUTE_TIMEOUT, deadline);
++		if (status == B_TIMED_OUT && !request->done) {
++			ERROR("command %#" B_PRIx32 " timed out\n",
++				virtio_gpu_request_header(request)->type);
++			request->async = true;
++			return B_TIMED_OUT;
++		}
++	}
++	return B_OK;
++}
++
++
++static status_t
++virtio_gpu_send_cmd(virtio_gpu_driver_info* info, const void* cmd,
++	size_t cmdSize, void* response, size_t responseSize, bool fenced = true)
++{
++	virtio_gpu_request* request = virtio_gpu_request_create(cmdSize,
++		responseSize);
++	if (request == NULL)
++		return B_NO_MEMORY;
++
++	memcpy(request->buffer, cmd, cmdSize);
++	if (fenced)
++		virtio_gpu_request_header(request)->flags |= VIRTIO_GPU_FLAG_FENCE;
++
++	status_t status = virtio_gpu_send_request(info, request);
++	if (status == B_TIMED_OUT)
++		return status;
++
++	if (status == B_OK)
++		memcpy(response, virtio_gpu_request_response(request), responseSize);
++	virtio_gpu_request_delete(request);
++	return status;
++}
++
++
++static bool
++virtio_gpu_fence_signaled_locked(virtio_gpu_driver_info* info, uint64 fenceId)
++{
++	if (fenceId == 0 || fenceId > info->lastFenceId)
++		return true;
++
++	RequestList::Iterator iterator = info->pendingFences.GetIterator();
++	while (virtio_gpu_request* request = iterator.Next()) {
++		if (request->fenceId == fenceId)
++			return false;
++	}
++	return true;
++}
++
++
++static void
++virtio_gpu_notify_fence_selects_locked(virtio_gpu_driver_info* info)
++{
++	RenderFileList::Iterator iterator = info->selectingFiles.GetIterator();
++	while (virtio_gpu_render_file* file = iterator.Next()) {
++		if (file->fenceBound
++			&& virtio_gpu_fence_signaled_locked(info, file->fenceId)) {
++			notify_select_event_pool(file->selectPool, B_SELECT_READ);
++		}
++	}
++}
+ 
+-	while (!info->virtio->queue_dequeue(info->controlQueue, NULL, NULL))
+-		spin(10);
+ 
+-	memcpy(response, (void*)(info->commandBuffer + cmdSize), responseSize);
++static status_t
++virtio_gpu_completion_thread(void* data)
++{
++	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)data;
++
++	while (acquire_sem(info->completionSem) == B_OK) {
++		MutexLocker locker(info->requestLock);
++		bool fenceSignaled = false;
++
++		void* cookie;
++		while (info->virtio->queue_dequeue(info->controlQueue, &cookie, NULL)) {
++			virtio_gpu_request* request = (virtio_gpu_request*)cookie;
++			if (request == NULL)
++				continue;
++
++			request->done = true;
++			if (request->fenceId != 0) {
++				info->pendingFences.Remove(request);
++				fenceSignaled = true;
++			}
++			if (request->async) {
++				virtio_gpu_ctrl_hdr* response
++					= virtio_gpu_request_response(request);
++				if (response->type >= VIRTIO_GPU_RESP_ERR_UNSPEC) {
++					ERROR("command %#" B_PRIx32 " failed: %#" B_PRIx32 "\n",
++						virtio_gpu_request_header(request)->type,
++						response->type);
++				}
++				virtio_gpu_request_delete(request);
++			}
++		}
+ 
+-	if (responseHdr->fence_id != info->fenceId) {
+-		ERROR("response fence id not right\n");
++		info->requestCondition.NotifyAll();
++		if (fenceSignaled)
++			virtio_gpu_notify_fence_selects_locked(info);
+ 	}
+ 	return B_OK;
+ }
+ 
+ 
++static void
++virtio_gpu_vqwait(void* driverCookie, void* cookie)
++{
++	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)cookie;
++
++	release_sem_etc(info->completionSem, 1, B_DO_NOT_RESCHEDULE);
++}
++
++
++//	#pragma mark - display
++
++
+ status_t
+ virtio_gpu_get_display_info(virtio_gpu_driver_info* info)
+ {
+@@ -468,53 +777,237 @@ virtio_gpu_set_display_mode(virtio_gpu_driver_info* info, display_mode *mode)
+ }
+ 
+ 
+-//	#pragma mark - device module API
++//	#pragma mark - 3D setup
+ 
+ 
+ static status_t
+-virtio_gpu_init_device(void* _info, void** _cookie)
++virtio_gpu_init_capsets(virtio_gpu_driver_info* info)
+ {
+-	CALLED();
+-	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)_info;
++	uint32 count = 0;
++	status_t status = info->virtio->read_device_config(info->virtio_device,
++		offsetof(struct virtio_gpu_config, num_capsets), &count, sizeof(count));
++	if (status != B_OK)
++		return status;
++
++	info->capsetCount = 0;
++	for (uint32 i = 0; i < count && info->capsetCount < VIRTIO_GPU_MAX_CAPSETS;
++			i++) {
++		struct virtio_gpu_get_capset_info getInfo = {};
++		struct virtio_gpu_resp_capset_info response = {};
++		getInfo.hdr.type = VIRTIO_GPU_CMD_GET_CAPSET_INFO;
++		getInfo.capset_index = i;
++
++		status = virtio_gpu_send_cmd(info, &getInfo, sizeof(getInfo),
++			&response, sizeof(response), false);
++		if (status != B_OK || response.hdr.type != VIRTIO_GPU_RESP_OK_CAPSET_INFO) {
++			ERROR("failed getting capset %" B_PRIu32 " info\n", i);
++			continue;
++		}
++
++		virtio_gpu_capset& capset = info->capsets[info->capsetCount++];
++		capset.id = response.capset_id;
++		capset.maxVersion = response.capset_max_version;
++		capset.maxSize = response.capset_max_size;
++		dprintf(DEVICE_NAME ": capset %" B_PRIu32 " version %" B_PRIu32
++			" size %" B_PRIu32 "\n", capset.id, capset.maxVersion,
++			capset.maxSize);
++	}
++	return B_OK;
++}
++
++
++static virtio_gpu_capset*
++virtio_gpu_find_capset(virtio_gpu_driver_info* info, uint32 id)
++{
++	for (uint32 i = 0; i < info->capsetCount; i++) {
++		if (info->capsets[i].id == id)
++			return &info->capsets[i];
++	}
++	return NULL;
++}
++
++
++/*!	Finds the host-visible shared memory region. The virtio bus manager
++	doesn't expose shared memory capabilities, so this reads them from the
++	PCI device the virtio device sits on.
++*/
++static status_t
++virtio_gpu_find_hostmem(virtio_gpu_driver_info* info)
++{
++	pci_device_module_info* pci = NULL;
++	pci_device* device = NULL;
++
++	device_node* node = sDeviceManager->get_parent_node(info->node);
++	while (node != NULL) {
++		const char* bus;
++		if (sDeviceManager->get_attr_string(node, B_DEVICE_BUS, &bus, false)
++				== B_OK && strcmp(bus, "pci") == 0) {
++			sDeviceManager->get_driver(node, (driver_module_info**)&pci,
++				(void**)&device);
++			sDeviceManager->put_node(node);
++			break;
++		}
++		device_node* parent = sDeviceManager->get_parent_node(node);
++		sDeviceManager->put_node(node);
++		node = parent;
++	}
++	if (pci == NULL || device == NULL)
++		return B_ENTRY_NOT_FOUND;
++
++	uint8 capabilityOffset;
++	if (pci->find_pci_capability(device, PCI_cap_id_vendspec,
++			&capabilityOffset) != B_OK) {
++		return B_ENTRY_NOT_FOUND;
++	}
++
++	pci_info pciInfo;
++	pci->get_pci_info(device, &pciInfo);
++
++	while (capabilityOffset != 0) {
++		uint32 header = pci->read_pci_config(device, capabilityOffset, 4);
++		uint8 next = (header >> 8) & 0xff;
++		uint8 length = (header >> 16) & 0xff;
++		uint8 cfgType = header >> 24;
++
++		// struct virtio_pci_cap64
++		if ((header & 0xff) == PCI_cap_id_vendspec
++			&& cfgType == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG && length >= 24) {
++			uint32 barAndId = pci->read_pci_config(device,
++				capabilityOffset + 4, 4);
++			uint8 bar = barAndId & 0xff;
++			uint8 id = (barAndId >> 8) & 0xff;
++			uint64 offset = pci->read_pci_config(device, capabilityOffset + 8, 4)
++				| (uint64)pci->read_pci_config(device, capabilityOffset + 16, 4)
++					<< 32;
++			uint64 size = pci->read_pci_config(device, capabilityOffset + 12, 4)
++				| (uint64)pci->read_pci_config(device, capabilityOffset + 20, 4)
++					<< 32;
++
++			if (id == VIRTIO_GPU_SHM_ID_HOST_VISIBLE && bar < 6) {
++				phys_addr_t barAddress = pciInfo.u.h0.base_registers[bar];
++				if ((pciInfo.u.h0.base_register_flags[bar] & PCI_address_type)
++						== PCI_address_type_64 && bar < 5) {
++					barAddress |= (uint64)pciInfo.u.h0.base_registers[bar + 1]
++						<< 32;
++				}
++				if (barAddress == 0)
++					return B_DEVICE_NOT_FOUND;
++
++				info->hostmemBase = barAddress + offset;
++				info->hostmemSize = size;
++				dprintf(DEVICE_NAME ": host visible region %#" B_PRIxPHYSADDR
++					", %" B_PRIu64 " MiB (BAR %u)\n", info->hostmemBase,
++					size / (1024 * 1024), bar);
++				return B_OK;
++			}
++		}
++		capabilityOffset = next;
++	}
++	return B_ENTRY_NOT_FOUND;
++}
++
++
++static status_t
++virtio_gpu_hostmem_alloc(virtio_gpu_driver_info* info, uint64 size,
++	uint64* _offset)
++{
++	MutexLocker locker(info->hostmemLock);
++
++	// first fit; the list is sorted by offset
++	uint64 offset = 0;
++	HostmemRangeList::Iterator iterator = info->hostmemRanges.GetIterator();
++	virtio_gpu_hostmem_range* next = NULL;
++	while ((next = iterator.Next()) != NULL) {
++		if (next->offset - offset >= size)
++			break;
++		offset = next->offset + next->size;
++	}
++	if (offset + size > info->hostmemSize)
++		return B_NO_MEMORY;
++
++	virtio_gpu_hostmem_range* range
++		= new(std::nothrow) virtio_gpu_hostmem_range;
++	if (range == NULL)
++		return B_NO_MEMORY;
++	range->offset = offset;
++	range->size = size;
++
++	if (next != NULL)
++		info->hostmemRanges.InsertBefore(next, range);
++	else
++		info->hostmemRanges.Add(range);
++
++	*_offset = offset;
++	return B_OK;
++}
++
++
++static void
++virtio_gpu_hostmem_free(virtio_gpu_driver_info* info, uint64 offset)
++{
++	MutexLocker locker(info->hostmemLock);
++
++	HostmemRangeList::Iterator iterator = info->hostmemRanges.GetIterator();
++	while (virtio_gpu_hostmem_range* range = iterator.Next()) {
++		if (range->offset == offset) {
++			iterator.Remove();
++			delete range;
++			return;
++		}
++	}
++}
++
++
++static status_t
++virtio_gpu_init_hw(virtio_gpu_driver_info* info)
++{
++	MutexLocker initLocker(sInitLock);
++	if (info->initCount++ > 0)
++		return B_OK;
+ 
+ 	device_node* parent = sDeviceManager->get_parent_node(info->node);
+ 	sDeviceManager->get_driver(parent, (driver_module_info**)&info->virtio,
+ 		(void**)&info->virtio_device);
+ 	sDeviceManager->put_node(parent);
+ 
+-	info->virtio->negotiate_features(info->virtio_device, VIRTIO_GPU_F_EDID,
++	info->virtio->negotiate_features(info->virtio_device,
++		VIRTIO_GPU_F_EDID | VIRTIO_GPU_F_VIRGL | VIRTIO_GPU_F_RESOURCE_BLOB
++			| VIRTIO_GPU_F_CONTEXT_INIT,
+ 		 &info->features, &get_feature_name);
+ 
+-	// TODO read config
+-
+ 	// Setup queues
+ 	::virtio_queue virtioQueues[2];
+ 	status_t status = info->virtio->alloc_queues(info->virtio_device, 2,
+ 		virtioQueues, NULL);
+ 	if (status != B_OK) {
+ 		ERROR("queue allocation failed (%s)\n", strerror(status));
++		info->initCount--;
+ 		return status;
+ 	}
+ 
+ 	info->controlQueue = virtioQueues[0];
+ 	info->cursorQueue = virtioQueues[1];
+ 
+-	// create command buffer area
+-	info->commandArea = create_area("virtiogpu command buffer", (void**)&info->commandBuffer,
+-		B_ANY_KERNEL_BLOCK_ADDRESS, B_PAGE_SIZE,
+-		B_FULL_LOCK, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
+-	if (info->commandArea < B_OK) {
+-		status = info->commandArea;
++	mutex_init(&info->commandLock, "virtio_gpu command lock");
++	mutex_init(&info->requestLock, "virtio_gpu request lock");
++	mutex_init(&info->hostmemLock, "virtio_gpu hostmem lock");
++	info->requestCondition.Init(info, "virtio_gpu request");
++	info->nextContextId = 1;
++	info->nextResourceId = VIRTIO_GPU_FIRST_3D_RESOURCE_ID;
++
++	info->completionSem = create_sem(0, "virtio_gpu completion");
++	if (info->completionSem < B_OK) {
++		status = info->completionSem;
+ 		goto err1;
+ 	}
+ 
+-	physical_entry entry;
+-	status = get_memory_map((void*)info->commandBuffer, B_PAGE_SIZE, &entry, 1);
+-	if (status != B_OK)
++	info->completionThread = spawn_kernel_thread(virtio_gpu_completion_thread,
++		"virtio_gpu completion", B_URGENT_DISPLAY_PRIORITY, info);
++	if (info->completionThread < B_OK) {
++		status = info->completionThread;
+ 		goto err2;
+-
+-	info->commandPhysAddr = entry.address;
+-	mutex_init(&info->commandLock, "virtiogpu command lock");
++	}
++	resume_thread(info->completionThread);
+ 
+ 	// Setup interrupt
+ 	status = info->virtio->setup_interrupt(info->virtio_device, NULL, info);
+@@ -527,37 +1020,91 @@ virtio_gpu_init_device(void* _info, void** _cookie)
+ 		virtio_gpu_vqwait, info);
+ 	if (status != B_OK) {
+ 		ERROR("queue interrupt setup failed (%s)\n", strerror(status));
+-		goto err3;
++		goto err4;
++	}
++
++	if ((info->features & VIRTIO_GPU_F_VIRGL) != 0)
++		virtio_gpu_init_capsets(info);
++	if ((info->features & VIRTIO_GPU_F_RESOURCE_BLOB) != 0
++		&& virtio_gpu_find_hostmem(info) != B_OK) {
++		dprintf(DEVICE_NAME ": no host visible region\n");
+ 	}
+ 
+-	*_cookie = info;
+ 	return B_OK;
+ 
++err4:
++	info->virtio->free_interrupts(info->virtio_device);
+ err3:
+-	mutex_destroy(&info->commandLock);
++	{
++		delete_sem(info->completionSem);
++		status_t result;
++		wait_for_thread(info->completionThread, &result);
++	}
++	info->completionSem = -1;
+ err2:
+-	delete_area(info->commandArea);
++	delete_sem(info->completionSem);
+ err1:
++	mutex_destroy(&info->hostmemLock);
++	mutex_destroy(&info->requestLock);
++	mutex_destroy(&info->commandLock);
++	info->virtio->free_queues(info->virtio_device);
++	info->initCount--;
+ 	return status;
+ }
+ 
+ 
+ static void
+-virtio_gpu_uninit_device(void* _cookie)
++virtio_gpu_uninit_hw(virtio_gpu_driver_info* info)
+ {
+-	CALLED();
+-	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)_cookie;
++	MutexLocker initLocker(sInitLock);
++	if (--info->initCount > 0)
++		return;
+ 
+ 	info->virtio->free_interrupts(info->virtio_device);
+ 
+-	mutex_destroy(&info->commandLock);
++	delete_sem(info->completionSem);
++	status_t result;
++	wait_for_thread(info->completionThread, &result);
++	info->completionSem = -1;
++
++	while (virtio_gpu_hostmem_range* range = info->hostmemRanges.RemoveHead())
++		delete range;
+ 
+-	delete_area(info->commandArea);
+-	info->commandArea = -1;
++	mutex_destroy(&info->hostmemLock);
++	mutex_destroy(&info->requestLock);
++	mutex_destroy(&info->commandLock);
+ 	info->virtio->free_queues(info->virtio_device);
+ }
+ 
+ 
++//	#pragma mark - device module API
++
++
++static status_t
++virtio_gpu_init_device(void* _info, void** _cookie)
++{
++	CALLED();
++	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)_info;
++
++	status_t status = virtio_gpu_init_hw(info);
++	if (status != B_OK)
++		return status;
++
++	*_cookie = info;
++	return B_OK;
++}
++
++
++static void
++virtio_gpu_uninit_device(void* _cookie)
++{
++	CALLED();
++	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)_cookie;
++
++	virtio_gpu_uninit_hw(info);
++}
++
++
+ static status_t
+ virtio_gpu_open(void* _info, const char* path, int openMode, void** _cookie)
+ {
+@@ -575,10 +1122,6 @@ virtio_gpu_open(void* _info, const char* path, int openMode, void** _cookie)
+ 	info->sharedArea = -1;
+ 	info->framebufferArea = -1;
+ 
+-	info->commandDone = create_sem(1, "virtio_gpu_command");
+-	if (info->commandDone < B_OK)
+-		goto error;
+-
+ 	info->sharedArea = create_area("virtio_gpu shared info",
+ 		(void**)&info->sharedInfo, B_ANY_KERNEL_ADDRESS,
+ 		ROUND_TO_PAGE_SIZE(sharedSize), B_FULL_LOCK,
+@@ -651,8 +1194,6 @@ error:
+ 	info->framebufferArea = -1;
+ 	delete_area(info->sharedArea);
+ 	info->sharedArea = -1;
+-	delete_sem(info->commandDone);
+-	info->commandDone = -1;
+ 	free(handle);
+ 	return B_ERROR;
+ }
+@@ -666,8 +1207,6 @@ virtio_gpu_close(void* cookie)
+ 
+ 	virtio_gpu_driver_info* info = handle->info;
+ 	info->updateThreadRunning = false;
+-	delete_sem(info->commandDone);
+-	info->commandDone  = -1;
+ 
+ 	return B_OK;
+ }
+@@ -683,7 +1222,6 @@ virtio_gpu_free(void* cookie)
+ 	int32 result;
+ 	wait_for_thread(info->updateThread, &result);
+ 	info->updateThread = -1;
+-	virtio_gpu_drain_queues(info);
+ 	delete_area(info->framebufferArea);
+ 	info->framebufferArea = -1;
+ 	delete_area(info->sharedArea);
+@@ -693,16 +1231,6 @@ virtio_gpu_free(void* cookie)
+ }
+ 
+ 
+-static void
+-virtio_gpu_vqwait(void* driverCookie, void* cookie)
+-{
+-	CALLED();
+-	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)cookie;
+-
+-	release_sem_etc(info->commandDone, 1, B_DO_NOT_RESCHEDULE);
+-}
+-
+-
+ static status_t
+ virtio_gpu_read(void* cookie, off_t pos, void* buffer, size_t* _length)
+ {
+@@ -765,38 +1293,881 @@ virtio_gpu_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
+ }
+ 
+ 
+-//	#pragma mark - driver module API
++//	#pragma mark - render node
+ 
+ 
+-static float
+-virtio_gpu_supports_device(device_node* parent)
++static status_t
++virtio_gpu_check_response(const virtio_gpu_ctrl_hdr& response,
++	uint32 expected, const char* what)
+ {
+-	CALLED();
+-	const char* bus;
+-	uint16 deviceType;
+-
+-	// make sure parent is really the Virtio bus manager
+-	if (sDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false))
+-		return -1;
+-
+-	if (strcmp(bus, "virtio"))
+-		return 0.0;
+-
+-	// check whether it's really a Virtio GPU device
+-	if (sDeviceManager->get_attr_uint16(parent, VIRTIO_DEVICE_TYPE_ITEM,
+-			&deviceType, true) != B_OK || deviceType != VIRTIO_DEVICE_ID_GPU)
+-		return 0.0;
++	if (response.type == expected)
++		return B_OK;
++
++	ERROR("%s failed: %#" B_PRIx32 "\n", what, response.type);
++	switch (response.type) {
++		case VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY:
++			return B_NO_MEMORY;
++		case VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER:
++		case VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID:
++		case VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID:
++			return B_BAD_VALUE;
++	}
++	return B_ERROR;
++}
+ 
+-	TRACE("Virtio gpu device found!\n");
+ 
+-	return 0.6;
++static status_t
++virtio_gpu_simple_cmd(virtio_gpu_driver_info* info, const void* cmd,
++	size_t cmdSize, const char* what)
++{
++	struct virtio_gpu_ctrl_hdr response = {};
++	status_t status = virtio_gpu_send_cmd(info, cmd, cmdSize, &response,
++		sizeof(response), false);
++	if (status != B_OK)
++		return status;
++	return virtio_gpu_check_response(response, VIRTIO_GPU_RESP_OK_NODATA, what);
+ }
+ 
+ 
++/*!	Copies \a size bytes of a client command stream behind a SUBMIT_3D
++	header into a new request.
++*/
+ static status_t
+-virtio_gpu_register_device(device_node* node)
++virtio_gpu_create_submit(uint32 contextId, uint64 command, uint32 size,
++	virtio_gpu_request** _request)
+ {
+-	CALLED();
++	if (size > VIRTIO_GPU_MAX_COMMAND_SIZE)
++		return B_BAD_VALUE;
++	if (size > 0 && !IS_USER_ADDRESS((void*)(addr_t)command))
++		return B_BAD_ADDRESS;
++
++	virtio_gpu_request* request = virtio_gpu_request_create(
++		sizeof(virtio_gpu_cmd_submit) + size, sizeof(virtio_gpu_ctrl_hdr));
++	if (request == NULL)
++		return B_NO_MEMORY;
++
++	virtio_gpu_cmd_submit* submit = (virtio_gpu_cmd_submit*)request->buffer;
++	submit->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
++	submit->hdr.ctx_id = contextId;
++	submit->size = size;
++	if (size > 0 && user_memcpy(submit + 1, (void*)(addr_t)command, size)
++			!= B_OK) {
++		virtio_gpu_request_delete(request);
++		return B_BAD_ADDRESS;
++	}
++
++	*_request = request;
++	return B_OK;
++}
++
++
++static virtio_gpu_blob*
++virtio_gpu_lookup_blob(virtio_gpu_render_file* file, uint32 handle)
++{
++	if (handle == 0 || handle > file->blobCapacity)
++		return NULL;
++	return file->blobs[handle - 1];
++}
++
++
++static status_t
++virtio_gpu_add_blob(virtio_gpu_render_file* file, virtio_gpu_blob* blob,
++	uint32* _handle)
++{
++	for (uint32 i = 0; i < file->blobCapacity; i++) {
++		if (file->blobs[i] == NULL) {
++			file->blobs[i] = blob;
++			*_handle = i + 1;
++			return B_OK;
++		}
++	}
++
++	uint32 capacity = file->blobCapacity == 0 ? 64 : file->blobCapacity * 2;
++	virtio_gpu_blob** blobs = (virtio_gpu_blob**)realloc(file->blobs,
++		capacity * sizeof(virtio_gpu_blob*));
++	if (blobs == NULL)
++		return B_NO_MEMORY;
++	memset(blobs + file->blobCapacity, 0,
++		(capacity - file->blobCapacity) * sizeof(virtio_gpu_blob*));
++
++	blobs[file->blobCapacity] = blob;
++	*_handle = file->blobCapacity + 1;
++	file->blobs = blobs;
++	file->blobCapacity = capacity;
++	return B_OK;
++}
++
++
++static void
++virtio_gpu_unmap_blob_area(virtio_gpu_blob* blob)
++{
++	if (blob->area < 0)
++		return;
++
++	// fails harmlessly when the team is already gone
++	vm_delete_area(blob->team, blob->area, true);
++	blob->area = -1;
++	blob->address = NULL;
++}
++
++
++static void
++virtio_gpu_destroy_blob(virtio_gpu_render_file* file, virtio_gpu_blob* blob)
++{
++	virtio_gpu_driver_info* info = file->info;
++
++	// The team's mapping has to go before the host takes the memory away.
++	virtio_gpu_unmap_blob_area(blob);
++
++	if (blob->hostMapped) {
++		struct virtio_gpu_resource_unmap_blob unmap = {};
++		unmap.hdr.type = VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB;
++		unmap.resource_id = blob->resourceId;
++		if (virtio_gpu_simple_cmd(info, &unmap, sizeof(unmap), "unmap blob")
++				== B_OK) {
++			virtio_gpu_hostmem_free(info, blob->hostOffset);
++		}
++	}
++
++	struct virtio_gpu_ctx_resource detach = {};
++	detach.hdr.type = VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE;
++	detach.hdr.ctx_id = file->contextId;
++	detach.resource_id = blob->resourceId;
++	virtio_gpu_simple_cmd(info, &detach, sizeof(detach), "detach resource");
++
++	struct virtio_gpu_resource_unref unref = {};
++	unref.hdr.type = VIRTIO_GPU_CMD_RESOURCE_UNREF;
++	unref.resource_id = blob->resourceId;
++	virtio_gpu_simple_cmd(info, &unref, sizeof(unref), "unref resource");
++
++	delete blob;
++}
++
++
++static status_t
++virtio_gpu_render_getparam(virtio_gpu_render_file* file,
++	virtio_gpu_3d_getparam& args)
++{
++	virtio_gpu_driver_info* info = file->info;
++
++	switch (args.param) {
++		case VIRTIO_GPU_3D_PARAM_3D_FEATURES:
++			args.value = (info->features & VIRTIO_GPU_F_VIRGL) != 0;
++			return B_OK;
++		case VIRTIO_GPU_3D_PARAM_CAPSET_QUERY_FIX:
++		case VIRTIO_GPU_3D_PARAM_EXPLICIT_DEBUG_NAME:
++			args.value = 1;
++			return B_OK;
++		case VIRTIO_GPU_3D_PARAM_RESOURCE_BLOB:
++			args.value = (info->features & VIRTIO_GPU_F_RESOURCE_BLOB) != 0;
++			return B_OK;
++		case VIRTIO_GPU_3D_PARAM_HOST_VISIBLE:
++			args.value = info->hostmemSize != 0;
++			return B_OK;
++		case VIRTIO_GPU_3D_PARAM_CROSS_DEVICE:
++			args.value = 0;
++			return B_OK;
++		case VIRTIO_GPU_3D_PARAM_CONTEXT_INIT:
++			args.value = (info->features & VIRTIO_GPU_F_CONTEXT_INIT) != 0;
++			return B_OK;
++		case VIRTIO_GPU_3D_PARAM_SUPPORTED_CAPSET_IDS:
++			args.value = 0;
++			for (uint32 i = 0; i < info->capsetCount; i++) {
++				if (info->capsets[i].id < 64)
++					args.value |= 1ULL << info->capsets[i].id;
++			}
++			return B_OK;
++		case VIRTIO_GPU_3D_PARAM_BLOB_ALIGNMENT:
++			args.value = VIRTIO_GPU_BLOB_ALIGNMENT;
++			return B_OK;
++	}
++	return B_BAD_VALUE;
++}
++
++
++static status_t
++virtio_gpu_render_get_caps(virtio_gpu_render_file* file,
++	const virtio_gpu_3d_get_caps& args)
++{
++	virtio_gpu_driver_info* info = file->info;
++
++	virtio_gpu_capset* capset = virtio_gpu_find_capset(info, args.cap_set_id);
++	if (capset == NULL || args.cap_set_ver > capset->maxVersion)
++		return B_BAD_VALUE;
++	if (!IS_USER_ADDRESS((void*)(addr_t)args.addr))
++		return B_BAD_ADDRESS;
++
++	virtio_gpu_request* request = virtio_gpu_request_create(
++		sizeof(virtio_gpu_get_capset),
++		sizeof(virtio_gpu_resp_capset) + capset->maxSize);
++	if (request == NULL)
++		return B_NO_MEMORY;
++
++	virtio_gpu_get_capset* get = (virtio_gpu_get_capset*)request->buffer;
++	get->hdr.type = VIRTIO_GPU_CMD_GET_CAPSET;
++	get->capset_id = capset->id;
++	get->capset_version = args.cap_set_ver;
++
++	status_t status = virtio_gpu_send_request(info, request);
++	if (status == B_TIMED_OUT)
++		return status;
++
++	virtio_gpu_resp_capset* response
++		= (virtio_gpu_resp_capset*)virtio_gpu_request_response(request);
++	if (status == B_OK) {
++		status = virtio_gpu_check_response(response->hdr,
++			VIRTIO_GPU_RESP_OK_CAPSET, "get capset");
++	}
++	if (status == B_OK) {
++		status = user_memcpy((void*)(addr_t)args.addr, response->capset_data,
++			min_c(args.size, capset->maxSize));
++	}
++	virtio_gpu_request_delete(request);
++	return status;
++}
++
++
++static status_t
++virtio_gpu_render_context_init(virtio_gpu_render_file* file,
++	const virtio_gpu_3d_context_init& args)
++{
++	virtio_gpu_driver_info* info = file->info;
++
++	virtio_gpu_3d_context_set_param params[8];
++	if (args.num_params > B_COUNT_OF(params))
++		return B_BAD_VALUE;
++	if (!IS_USER_ADDRESS((void*)(addr_t)args.ctx_set_params)
++		|| user_memcpy(params, (void*)(addr_t)args.ctx_set_params,
++			args.num_params * sizeof(params[0])) != B_OK) {
++		return B_BAD_ADDRESS;
++	}
++
++	uint32 capsetId = 0;
++	char name[64] = {};
++	for (uint32 i = 0; i < args.num_params; i++) {
++		switch (params[i].param) {
++			case VIRTIO_GPU_3D_CONTEXT_PARAM_CAPSET_ID:
++				capsetId = params[i].value;
++				break;
++			case VIRTIO_GPU_3D_CONTEXT_PARAM_NUM_RINGS:
++				if (params[i].value > VIRTIO_GPU_MAX_RINGS)
++					return B_BAD_VALUE;
++				break;
++			case VIRTIO_GPU_3D_CONTEXT_PARAM_POLL_RINGS_MASK:
++				// fences are always waited for through the driver
++				break;
++			case VIRTIO_GPU_3D_CONTEXT_PARAM_DEBUG_NAME:
++				if (!IS_USER_ADDRESS((void*)(addr_t)params[i].value)
++					|| user_strlcpy(name, (const char*)(addr_t)params[i].value,
++						sizeof(name)) < B_OK) {
++					return B_BAD_ADDRESS;
++				}
++				break;
++			default:
++				return B_BAD_VALUE;
++		}
++	}
++
++	if (capsetId != 0 && (virtio_gpu_find_capset(info, capsetId) == NULL
++			|| (info->features & VIRTIO_GPU_F_CONTEXT_INIT) == 0)) {
++		return B_BAD_VALUE;
++	}
++	if (name[0] == '\0') {
++		snprintf(name, sizeof(name), "team %" B_PRId32,
++			team_get_current_team_id());
++	}
++
++	MutexLocker locker(file->lock);
++	if (file->contextId != 0)
++		return B_BUSY;
++
++	uint32 contextId = atomic_add(&info->nextContextId, 1);
++
++	struct virtio_gpu_ctx_create create = {};
++	create.hdr.type = VIRTIO_GPU_CMD_CTX_CREATE;
++	create.hdr.ctx_id = contextId;
++	create.context_init = capsetId & VIRTIO_GPU_CONTEXT_INIT_CAPSET_ID_MASK;
++	create.nlen = strnlen(name, sizeof(create.debug_name));
++	memcpy(create.debug_name, name, create.nlen);
++
++	status_t status = virtio_gpu_simple_cmd(info, &create, sizeof(create),
++		"create context");
++	if (status != B_OK)
++		return status;
++
++	file->contextId = contextId;
++	file->capsetId = capsetId;
++	return B_OK;
++}
++
++
++static status_t
++virtio_gpu_render_create_blob(virtio_gpu_render_file* file,
++	virtio_gpu_3d_resource_create_blob& args)
++{
++	virtio_gpu_driver_info* info = file->info;
++
++	if ((info->features & VIRTIO_GPU_F_RESOURCE_BLOB) == 0)
++		return B_NOT_SUPPORTED;
++	// Only host memory for now: Venus allocates everything that way.
++	if (args.blob_mem != VIRTIO_GPU_BLOB_MEM_HOST3D)
++		return B_NOT_SUPPORTED;
++	if (args.size == 0 || args.size % VIRTIO_GPU_BLOB_ALIGNMENT != 0)
++		return B_BAD_VALUE;
++	if ((args.blob_flags & ~(VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE
++			| VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE)) != 0) {
++		return B_BAD_VALUE;
++	}
++
++	MutexLocker locker(file->lock);
++	if (file->contextId == 0)
++		return B_BAD_VALUE;
++
++	status_t status;
++	if (args.cmd_size > 0) {
++		// The command creates the host memory that blob_id refers to.
++		virtio_gpu_request* request;
++		status = virtio_gpu_create_submit(file->contextId, args.cmd,
++			args.cmd_size, &request);
++		if (status != B_OK)
++			return status;
++
++		status = virtio_gpu_send_request(info, request);
++		if (status == B_TIMED_OUT)
++			return status;
++		if (status == B_OK) {
++			status = virtio_gpu_check_response(
++				*virtio_gpu_request_response(request),
++				VIRTIO_GPU_RESP_OK_NODATA, "blob command");
++		}
++		virtio_gpu_request_delete(request);
++		if (status != B_OK)
++			return status;
++	}
++
++	virtio_gpu_blob* blob = new(std::nothrow) virtio_gpu_blob;
++	if (blob == NULL)
++		return B_NO_MEMORY;
++	blob->resourceId = atomic_add(&info->nextResourceId, 1);
++	blob->blobMem = args.blob_mem;
++	blob->blobFlags = args.blob_flags;
++	blob->size = args.size;
++	blob->hostMapped = false;
++	blob->hostOffset = 0;
++	blob->mapInfo = 0;
++	blob->area = -1;
++	blob->team = -1;
++	blob->address = NULL;
++
++	struct virtio_gpu_resource_create_blob create = {};
++	create.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB;
++	create.hdr.ctx_id = file->contextId;
++	create.resource_id = blob->resourceId;
++	create.blob_mem = args.blob_mem;
++	create.blob_flags = args.blob_flags;
++	create.blob_id = args.blob_id;
++	create.size = args.size;
++	status = virtio_gpu_simple_cmd(info, &create, sizeof(create), "create blob");
++	if (status != B_OK) {
++		delete blob;
++		return status;
++	}
++
++	struct virtio_gpu_ctx_resource attach = {};
++	attach.hdr.type = VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE;
++	attach.hdr.ctx_id = file->contextId;
++	attach.resource_id = blob->resourceId;
++	status = virtio_gpu_simple_cmd(info, &attach, sizeof(attach),
++		"attach resource");
++
++	uint32 handle = 0;
++	if (status == B_OK)
++		status = virtio_gpu_add_blob(file, blob, &handle);
++	if (status != B_OK) {
++		struct virtio_gpu_resource_unref unref = {};
++		unref.hdr.type = VIRTIO_GPU_CMD_RESOURCE_UNREF;
++		unref.resource_id = blob->resourceId;
++		virtio_gpu_simple_cmd(info, &unref, sizeof(unref), "unref resource");
++		delete blob;
++		return status;
++	}
++
++	args.bo_handle = handle;
++	args.res_handle = blob->resourceId;
++	return B_OK;
++}
++
++
++static status_t
++virtio_gpu_render_map(virtio_gpu_render_file* file, virtio_gpu_3d_map& args)
++{
++	virtio_gpu_driver_info* info = file->info;
++
++	MutexLocker locker(file->lock);
++	virtio_gpu_blob* blob = virtio_gpu_lookup_blob(file, args.handle);
++	if (blob == NULL)
++		return B_BAD_VALUE;
++	if ((blob->blobFlags & VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE) == 0
++		|| info->hostmemSize == 0) {
++		return B_NOT_ALLOWED;
++	}
++
++	team_id team = team_get_current_team_id();
++	if (blob->area >= 0) {
++		if (blob->team != team)
++			return B_BUSY;
++		args.area = blob->area;
++		args.address = (addr_t)blob->address;
++		return B_OK;
++	}
++
++	if (!blob->hostMapped) {
++		uint64 offset;
++		status_t status = virtio_gpu_hostmem_alloc(info, blob->size, &offset);
++		if (status != B_OK)
++			return status;
++
++		struct virtio_gpu_resource_map_blob map = {};
++		struct virtio_gpu_resp_map_info response = {};
++		map.hdr.type = VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB;
++		map.hdr.ctx_id = file->contextId;
++		map.resource_id = blob->resourceId;
++		map.offset = offset;
++		status = virtio_gpu_send_cmd(info, &map, sizeof(map), &response,
++			sizeof(response), false);
++		if (status == B_OK) {
++			status = virtio_gpu_check_response(response.hdr,
++				VIRTIO_GPU_RESP_OK_MAP_INFO, "map blob");
++		}
++		if (status != B_OK) {
++			if (status != B_TIMED_OUT)
++				virtio_gpu_hostmem_free(info, offset);
++			return status;
++		}
++
++		blob->hostMapped = true;
++		blob->hostOffset = offset;
++		blob->mapInfo = response.map_info;
++	}
++
++	// Device memory (the uncached default) would fault on unaligned
++	// accesses, which memcpy() does all the time; write combining is the
++	// closest normal memory type.
++	uint32 memoryType = B_WRITE_BACK_MEMORY;
++	switch (blob->mapInfo & VIRTIO_GPU_MAP_CACHE_MASK) {
++		case VIRTIO_GPU_MAP_CACHE_UNCACHED:
++		case VIRTIO_GPU_MAP_CACHE_WC:
++			memoryType = B_WRITE_COMBINING_MEMORY;
++			break;
++	}
++
++	// B_SHARED_AREA: fork() copies every other area copy-on-write, which
++	// would detach the parent from the host memory (the Venus ring stalls)
++	// and leave device pages in a private cache (the kernel hangs on exit).
++	void* address = NULL;
++	area_id area = vm_map_physical_memory(team, "virtio_gpu blob", &address,
++		B_ANY_ADDRESS | memoryType, blob->size,
++		B_READ_AREA | B_WRITE_AREA | B_SHARED_AREA,
++		info->hostmemBase + blob->hostOffset, false);
++	if (area < 0)
++		return area;
++
++	blob->area = area;
++	blob->team = team;
++	blob->address = address;
++
++	args.area = area;
++	args.address = (addr_t)address;
++	return B_OK;
++}
++
++
++static status_t
++virtio_gpu_render_execbuffer(virtio_gpu_render_file* file,
++	virtio_gpu_3d_execbuffer& args)
++{
++	virtio_gpu_driver_info* info = file->info;
++
++	if ((args.flags & ~(VIRTIO_GPU_3D_EXECBUF_FENCE
++			| VIRTIO_GPU_3D_EXECBUF_RING_IDX)) != 0) {
++		return B_BAD_VALUE;
++	}
++	if ((args.flags & VIRTIO_GPU_3D_EXECBUF_RING_IDX) != 0
++		&& args.ring_idx >= VIRTIO_GPU_MAX_RINGS) {
++		return B_BAD_VALUE;
++	}
++
++	uint32 contextId;
++	{
++		MutexLocker locker(file->lock);
++		contextId = file->contextId;
++	}
++	if (contextId == 0)
++		return B_BAD_VALUE;
++
++	virtio_gpu_request* request;
++	status_t status = virtio_gpu_create_submit(contextId, args.command,
++		args.size, &request);
++	if (status != B_OK)
++		return status;
++
++	virtio_gpu_ctrl_hdr* header = virtio_gpu_request_header(request);
++	if ((args.flags & VIRTIO_GPU_3D_EXECBUF_FENCE) != 0) {
++		header->flags = VIRTIO_GPU_FLAG_FENCE;
++		if ((args.flags & VIRTIO_GPU_3D_EXECBUF_RING_IDX) != 0) {
++			header->flags |= VIRTIO_GPU_FLAG_INFO_RING_IDX;
++			header->ring_idx = args.ring_idx;
++		}
++		// marks it as tracked; the queue assigns the real id
++		request->fenceId = 1;
++	}
++	request->async = true;
++
++	MutexLocker locker(info->requestLock);
++	status = virtio_gpu_queue_request_locked(info, request,
++		system_time() + VIRTIO_GPU_COMMAND_TIMEOUT);
++	if (status != B_OK) {
++		virtio_gpu_request_delete(request);
++		return status;
++	}
++
++	// The completion thread may free the request once the lock is released.
++	args.fence_id = request->fenceId;
++	return B_OK;
++}
++
++
++static status_t
++virtio_gpu_render_fence_wait(virtio_gpu_render_file* file,
++	const virtio_gpu_3d_fence& args)
++{
++	virtio_gpu_driver_info* info = file->info;
++
++	uint32 flags = B_CAN_INTERRUPT;
++	bigtime_t deadline = 0;
++	if (args.timeout >= 0) {
++		flags |= B_ABSOLUTE_TIMEOUT;
++		deadline = system_time() + args.timeout;
++	}
++
++	MutexLocker locker(info->requestLock);
++	while (!virtio_gpu_fence_signaled_locked(info, args.fence_id)) {
++		if (args.timeout == 0)
++			return B_TIMED_OUT;
++		status_t status = info->requestCondition.Wait(&info->requestLock,
++			flags, deadline);
++		if (status == B_TIMED_OUT || status == B_INTERRUPTED) {
++			if (virtio_gpu_fence_signaled_locked(info, args.fence_id))
++				break;
++			return status;
++		}
++	}
++	return B_OK;
++}
++
++
++static status_t
++virtio_gpu_render_init_device(void* _info, void** _cookie)
++{
++	CALLED();
++	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)_info;
++
++	status_t status = virtio_gpu_init_hw(info);
++	if (status != B_OK)
++		return status;
++
++	*_cookie = info;
++	return B_OK;
++}
++
++
++static status_t
++virtio_gpu_render_open(void* _info, const char* path, int openMode,
++	void** _cookie)
++{
++	CALLED();
++	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)_info;
++
++	virtio_gpu_render_file* file = new(std::nothrow) virtio_gpu_render_file;
++	if (file == NULL)
++		return B_NO_MEMORY;
++
++	file->info = info;
++	mutex_init(&file->lock, "virtio_gpu render file");
++	file->contextId = 0;
++	file->capsetId = 0;
++	file->blobs = NULL;
++	file->blobCapacity = 0;
++	file->fenceBound = false;
++	file->fenceId = 0;
++	file->selectPool = NULL;
++	file->selecting = false;
++
++	*_cookie = file;
++	return B_OK;
++}
++
++
++static status_t
++virtio_gpu_render_close(void* cookie)
++{
++	return B_OK;
++}
++
++
++static status_t
++virtio_gpu_render_free(void* cookie)
++{
++	virtio_gpu_render_file* file = (virtio_gpu_render_file*)cookie;
++	virtio_gpu_driver_info* info = file->info;
++
++	{
++		MutexLocker locker(info->requestLock);
++		if (file->selecting) {
++			info->selectingFiles.Remove(file);
++			file->selecting = false;
++		}
++		if (file->selectPool != NULL) {
++			delete_select_sync_pool(file->selectPool);
++			file->selectPool = NULL;
++		}
++	}
++
++	for (uint32 i = 0; i < file->blobCapacity; i++) {
++		if (file->blobs[i] != NULL)
++			virtio_gpu_destroy_blob(file, file->blobs[i]);
++	}
++	free(file->blobs);
++
++	if (file->contextId != 0) {
++		struct virtio_gpu_ctx_destroy destroy = {};
++		destroy.hdr.type = VIRTIO_GPU_CMD_CTX_DESTROY;
++		destroy.hdr.ctx_id = file->contextId;
++		virtio_gpu_simple_cmd(info, &destroy, sizeof(destroy),
++			"destroy context");
++	}
++
++	mutex_destroy(&file->lock);
++	delete file;
++	return B_OK;
++}
++
++
++template<typename Args>
++static status_t
++virtio_gpu_copy_args(Args& args, void* buffer, size_t length)
++{
++	if (length != sizeof(Args) || !IS_USER_ADDRESS(buffer))
++		return B_BAD_VALUE;
++	return user_memcpy(&args, buffer, sizeof(Args));
++}
++
++
++static status_t
++virtio_gpu_render_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
++{
++	virtio_gpu_render_file* file = (virtio_gpu_render_file*)cookie;
++	virtio_gpu_driver_info* info = file->info;
++	status_t status;
++
++	switch (op) {
++		case VIRTIO_GPU_3D_GETPARAM:
++		{
++			virtio_gpu_3d_getparam args;
++			if ((status = virtio_gpu_copy_args(args, buffer, length)) != B_OK)
++				return status;
++			if ((status = virtio_gpu_render_getparam(file, args)) != B_OK)
++				return status;
++			return user_memcpy(buffer, &args, sizeof(args));
++		}
++
++		case VIRTIO_GPU_3D_GET_CAPS:
++		{
++			virtio_gpu_3d_get_caps args;
++			if ((status = virtio_gpu_copy_args(args, buffer, length)) != B_OK)
++				return status;
++			return virtio_gpu_render_get_caps(file, args);
++		}
++
++		case VIRTIO_GPU_3D_CONTEXT_INIT:
++		{
++			virtio_gpu_3d_context_init args;
++			if ((status = virtio_gpu_copy_args(args, buffer, length)) != B_OK)
++				return status;
++			return virtio_gpu_render_context_init(file, args);
++		}
++
++		case VIRTIO_GPU_3D_RESOURCE_CREATE_BLOB:
++		{
++			virtio_gpu_3d_resource_create_blob args;
++			if ((status = virtio_gpu_copy_args(args, buffer, length)) != B_OK)
++				return status;
++			if ((status = virtio_gpu_render_create_blob(file, args)) != B_OK)
++				return status;
++			return user_memcpy(buffer, &args, sizeof(args));
++		}
++
++		case VIRTIO_GPU_3D_RESOURCE_INFO:
++		{
++			virtio_gpu_3d_resource_info args;
++			if ((status = virtio_gpu_copy_args(args, buffer, length)) != B_OK)
++				return status;
++
++			MutexLocker locker(file->lock);
++			virtio_gpu_blob* blob = virtio_gpu_lookup_blob(file, args.bo_handle);
++			if (blob == NULL)
++				return B_BAD_VALUE;
++			args.res_handle = blob->resourceId;
++			args.size = blob->size;
++			args.blob_mem = blob->blobMem;
++			locker.Unlock();
++			return user_memcpy(buffer, &args, sizeof(args));
++		}
++
++		case VIRTIO_GPU_3D_MAP:
++		{
++			virtio_gpu_3d_map args;
++			if ((status = virtio_gpu_copy_args(args, buffer, length)) != B_OK)
++				return status;
++			if ((status = virtio_gpu_render_map(file, args)) != B_OK)
++				return status;
++			return user_memcpy(buffer, &args, sizeof(args));
++		}
++
++		case VIRTIO_GPU_3D_UNMAP:
++		case VIRTIO_GPU_3D_CLOSE_HANDLE:
++		{
++			virtio_gpu_3d_handle args;
++			if ((status = virtio_gpu_copy_args(args, buffer, length)) != B_OK)
++				return status;
++
++			MutexLocker locker(file->lock);
++			virtio_gpu_blob* blob = virtio_gpu_lookup_blob(file, args.handle);
++			if (blob == NULL)
++				return B_BAD_VALUE;
++			if (op == VIRTIO_GPU_3D_UNMAP) {
++				virtio_gpu_unmap_blob_area(blob);
++				return B_OK;
++			}
++			file->blobs[args.handle - 1] = NULL;
++			virtio_gpu_destroy_blob(file, blob);
++			return B_OK;
++		}
++
++		case VIRTIO_GPU_3D_EXECBUFFER:
++		{
++			virtio_gpu_3d_execbuffer args;
++			if ((status = virtio_gpu_copy_args(args, buffer, length)) != B_OK)
++				return status;
++			if ((status = virtio_gpu_render_execbuffer(file, args)) != B_OK)
++				return status;
++			return user_memcpy(buffer, &args, sizeof(args));
++		}
++
++		case VIRTIO_GPU_3D_FENCE_BIND:
++		{
++			virtio_gpu_3d_fence args;
++			if ((status = virtio_gpu_copy_args(args, buffer, length)) != B_OK)
++				return status;
++
++			MutexLocker locker(info->requestLock);
++			file->fenceBound = true;
++			file->fenceId = args.fence_id;
++			if (file->selectPool != NULL
++				&& virtio_gpu_fence_signaled_locked(info, file->fenceId)) {
++				notify_select_event_pool(file->selectPool, B_SELECT_READ);
++			}
++			return B_OK;
++		}
++
++		case VIRTIO_GPU_3D_FENCE_WAIT:
++		{
++			virtio_gpu_3d_fence args;
++			if ((status = virtio_gpu_copy_args(args, buffer, length)) != B_OK)
++				return status;
++			return virtio_gpu_render_fence_wait(file, args);
++		}
++	}
++
++	return B_DEV_INVALID_IOCTL;
++}
++
++
++static status_t
++virtio_gpu_render_select(void* cookie, uint8 event, selectsync* sync)
++{
++	virtio_gpu_render_file* file = (virtio_gpu_render_file*)cookie;
++	virtio_gpu_driver_info* info = file->info;
++
++	if (event != B_SELECT_READ)
++		return B_BAD_VALUE;
++
++	MutexLocker locker(info->requestLock);
++	status_t status = add_select_sync_pool_entry(&file->selectPool, sync,
++		event);
++	if (status != B_OK)
++		return status;
++
++	if (!file->selecting) {
++		info->selectingFiles.Add(file);
++		file->selecting = true;
++	}
++	if (file->fenceBound
++		&& virtio_gpu_fence_signaled_locked(info, file->fenceId)) {
++		notify_select_event(sync, event);
++	}
++	return B_OK;
++}
++
++
++static status_t
++virtio_gpu_render_deselect(void* cookie, uint8 event, selectsync* sync)
++{
++	virtio_gpu_render_file* file = (virtio_gpu_render_file*)cookie;
++	virtio_gpu_driver_info* info = file->info;
++
++	MutexLocker locker(info->requestLock);
++	remove_select_sync_pool_entry(&file->selectPool, sync, event);
++	if (file->selectPool == NULL && file->selecting) {
++		info->selectingFiles.Remove(file);
++		file->selecting = false;
++	}
++	return B_OK;
++}
++
++
++//	#pragma mark - driver module API
++
++
++static float
++virtio_gpu_supports_device(device_node* parent)
++{
++	CALLED();
++	const char* bus;
++	uint16 deviceType;
++
++	// make sure parent is really the Virtio bus manager
++	if (sDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false))
++		return -1;
++
++	if (strcmp(bus, "virtio"))
++		return 0.0;
++
++	// check whether it's really a Virtio GPU device
++	if (sDeviceManager->get_attr_uint16(parent, VIRTIO_DEVICE_TYPE_ITEM,
++			&deviceType, true) != B_OK || deviceType != VIRTIO_DEVICE_ID_GPU)
++		return 0.0;
++
++	TRACE("Virtio gpu device found!\n");
++
++	return 0.6;
++}
++
++
++static status_t
++virtio_gpu_register_device(device_node* node)
++{
++	CALLED();
+ 
+ 	device_attr attrs[] = {
+ 		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE, {.string = "Virtio GPU"} },
+@@ -813,15 +2184,14 @@ virtio_gpu_init_driver(device_node* node, void** cookie)
+ {
+ 	CALLED();
+ 
+-	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)malloc(
+-		sizeof(virtio_gpu_driver_info));
++	virtio_gpu_driver_info* info
++		= new(std::nothrow) virtio_gpu_driver_info();
+ 	if (info == NULL)
+ 		return B_NO_MEMORY;
+ 
+-	memset(info, 0, sizeof(*info));
+-
+ 	info->framebufferArea = -1;
+ 	info->sharedArea = -1;
++	info->completionSem = -1;
+ 
+ 	info->node = node;
+ 
+@@ -835,7 +2205,7 @@ virtio_gpu_uninit_driver(void* _cookie)
+ {
+ 	CALLED();
+ 	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)_cookie;
+-	free(info);
++	delete info;
+ }
+ 
+ 
+@@ -856,9 +2226,20 @@ virtio_gpu_register_child_devices(void* _cookie)
+ 
+ 	status = sDeviceManager->publish_device(info->node, name,
+ 		VIRTIO_GPU_DEVICE_MODULE_NAME);
+-	if (status != B_OK)
++	if (status != B_OK) {
+ 		sDeviceManager->free_id(VIRTIO_GPU_DEVICE_ID_GENERATOR, id);
+-	return status;
++		return status;
++	}
++
++	// The render node for 3D clients; failing to publish it leaves the
++	// display working.
++	snprintf(name, sizeof(name), "%s/%" B_PRId32,
++		VIRTIO_GPU_RENDER_DEVICE_DIR + strlen("/dev/"), id);
++	if (sDeviceManager->publish_device(info->node, name,
++			VIRTIO_GPU_RENDER_MODULE_NAME) != B_OK) {
++		ERROR("could not publish %s\n", name);
++	}
++	return B_OK;
+ }
+ 
+ 
+@@ -893,6 +2274,29 @@ struct device_module_info sVirtioGpuDevice = {
+ 	NULL,	// deselect
+ };
+ 
++struct device_module_info sVirtioGpuRenderDevice = {
++	{
++		VIRTIO_GPU_RENDER_MODULE_NAME,
++		0,
++		NULL
++	},
++
++	virtio_gpu_render_init_device,
++	virtio_gpu_uninit_device,
++	NULL, // remove,
++
++	virtio_gpu_render_open,
++	virtio_gpu_render_close,
++	virtio_gpu_render_free,
++	virtio_gpu_read,
++	virtio_gpu_write,
++	NULL,	// io
++	virtio_gpu_render_ioctl,
++
++	virtio_gpu_render_select,
++	virtio_gpu_render_deselect,
++};
++
+ struct driver_module_info sVirtioGpuDriver = {
+ 	{
+ 		VIRTIO_GPU_DRIVER_MODULE_NAME,
+@@ -912,5 +2316,6 @@ struct driver_module_info sVirtioGpuDriver = {
+ module_info* modules[] = {
+ 	(module_info*)&sVirtioGpuDriver,
+ 	(module_info*)&sVirtioGpuDevice,
++	(module_info*)&sVirtioGpuRenderDevice,
+ 	NULL
+ };
+-- 
+2.54.0 (Apple Git-157)
+

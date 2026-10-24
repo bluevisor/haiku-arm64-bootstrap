@@ -1,0 +1,30 @@
+From 63f36a3e848636404e348aae02f240da5169cb4b Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Sat, 24 Oct 2026 15:46:41 -0700
+Subject: [PATCH] haiku-hda-48khz.diff
+
+---
+ src/add-ons/kernel/drivers/audio/hda/hda_codec.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/add-ons/kernel/drivers/audio/hda/hda_codec.cpp b/src/add-ons/kernel/drivers/audio/hda/hda_codec.cpp
+index b15a677d..8ace3305 100644
+--- a/src/add-ons/kernel/drivers/audio/hda/hda_codec.cpp
++++ b/src/add-ons/kernel/drivers/audio/hda/hda_codec.cpp
+@@ -460,6 +460,13 @@ hda_get_stream_support(hda_codec* codec, uint32 nodeID, uint32* formats,
+ 		if (resp[1] & (1 << 11))
+ 			*rates |= B_SR_384000;
+ 
++		// Under QEMU the codec advertises up to 96 kHz, the node then picks the
++		// highest rate, and every sample is resampled twice (mixer 48k->96k here,
++		// 96k->48k in QEMU's mixeng) with timing slop at each hop: audible pops
++		// in a VM. Nothing here plays above 48 kHz, so don't offer it.
++		*rates &= ~(B_SR_88200 | B_SR_96000 | B_SR_176400 | B_SR_192000
++			| B_SR_384000);
++
+ 		if (resp[1] & PCM_8_BIT)
+ 			*formats |= B_FMT_8BIT_S;
+ 		if (resp[1] & PCM_16_BIT)
+-- 
+2.54.0 (Apple Git-157)
+

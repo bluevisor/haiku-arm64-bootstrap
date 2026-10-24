@@ -1,0 +1,48 @@
+From f6aec8630a77a0f157bc12bc00f2402ed054f345 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Sat, 24 Oct 2026 15:46:40 -0700
+Subject: [PATCH] netapi-local-openssl.patch
+
+---
+ src/kits/network/libnetapi/Jamfile | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/kits/network/libnetapi/Jamfile b/src/kits/network/libnetapi/Jamfile
+index e6ba3541..76462844 100644
+--- a/src/kits/network/libnetapi/Jamfile
++++ b/src/kits/network/libnetapi/Jamfile
+@@ -19,6 +19,7 @@ for architectureObject in [ MultiArchSubDirSetup ] {
+ 
+ 		UsePrivateSystemHeaders ;
+ 
++		local localOpenSSLLibraries ;
+ 		if [ FIsBuildFeatureEnabled openssl ] {
+ 			SubDirC++Flags -DOPENSSL_ENABLED -DOPENSSL_API_COMPAT=10101 -DOPENSSL_NO_DEPRECATED=1 ;
+ 			UseBuildFeatureHeaders openssl ;
+@@ -28,6 +29,15 @@ for architectureObject in [ MultiArchSubDirSetup ] {
+ 				# Dependency needed to trigger downloading/unzipping the package
+ 				# before compiling the files.
+ 			SetupFeatureObjectsDir ssl ;
++		} else if $(HAIKU_LOCAL_OPENSSL) {
++			# No openssl3 package exists for this architecture yet, so point
++			# HAIKU_LOCAL_OPENSSL at a staged tree with develop/headers/openssl
++			# and develop/lib/lib{ssl,crypto}.so instead.
++			SubDirC++Flags -DOPENSSL_ENABLED -DOPENSSL_API_COMPAT=10101 -DOPENSSL_NO_DEPRECATED=1 ;
++			SubDirSysHdrs $(HAIKU_LOCAL_OPENSSL)/develop/headers ;
++			localOpenSSLLibraries = $(HAIKU_LOCAL_OPENSSL)/develop/lib/libssl.so
++				$(HAIKU_LOCAL_OPENSSL)/develop/lib/libcrypto.so ;
++			SetupFeatureObjectsDir ssl ;
+ 		} else {
+ 			SetupFeatureObjectsDir no-ssl ;
+ 		}
+@@ -61,6 +71,7 @@ for architectureObject in [ MultiArchSubDirSetup ] {
+ 			:
+ 			be shared $(TARGET_NETWORK_LIBS) [ TargetLibstdc++ ]
+ 			[ TargetLibsupc++ ] [ BuildFeatureAttribute openssl : libraries ]
++			$(localOpenSSLLibraries)
+ 			[ BuildFeatureAttribute icu : libraries ]
+ 			;
+ 	}
+-- 
+2.54.0 (Apple Git-157)
+

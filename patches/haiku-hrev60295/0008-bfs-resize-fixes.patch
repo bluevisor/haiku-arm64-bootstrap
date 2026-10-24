@@ -1,0 +1,41 @@
+From 7f96ae4d18b73404a2a84f3dac3d3967bd62948a Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Sat, 24 Oct 2026 15:46:41 -0700
+Subject: [PATCH] bfs-resize-fixes.patch
+
+---
+ src/add-ons/kernel/file_systems/bfs/BlockAllocator.cpp | 2 +-
+ src/add-ons/kernel/file_systems/bfs/ResizeVisitor.cpp  | 4 ++++
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/add-ons/kernel/file_systems/bfs/BlockAllocator.cpp b/src/add-ons/kernel/file_systems/bfs/BlockAllocator.cpp
+index c9a28a1c..ee9b23df 100644
+--- a/src/add-ons/kernel/file_systems/bfs/BlockAllocator.cpp
++++ b/src/add-ons/kernel/file_systems/bfs/BlockAllocator.cpp
+@@ -752,7 +752,7 @@ BlockAllocator::Reinitialize()
+ 		// would cause a deadlock
+ 
+ 	delete[] fGroups;
+-	return Initialize(true, true);
++	return Initialize(true, false);
+ }
+ 
+ 
+diff --git a/src/add-ons/kernel/file_systems/bfs/ResizeVisitor.cpp b/src/add-ons/kernel/file_systems/bfs/ResizeVisitor.cpp
+index 353b7e50..391da778 100644
+--- a/src/add-ons/kernel/file_systems/bfs/ResizeVisitor.cpp
++++ b/src/add-ons/kernel/file_systems/bfs/ResizeVisitor.cpp
+@@ -93,6 +93,10 @@ ResizeVisitor::Resize(off_t size, bool dryRun, disk_job_id job)
+ 			return status;
+ 		}
+ 	} else {
++		// The allowed range only applies to moving data out of the way; the
++		// growing log has to be allocated in front of it.
++		GetVolume()->Allocator().SetAllowedRange(0, 0);
++
+ 		status = GetVolume()->GetJournal(0)->MoveLog(fNewLog);
+ 		if (status != B_OK) {
+ 			FATAL(("Resize: Failed to move the log area!\n"));
+-- 
+2.54.0 (Apple Git-157)
+
