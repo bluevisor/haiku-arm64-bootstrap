@@ -207,6 +207,28 @@ scp out/haiku-system/*-6-arm64.hpkg haiku:/boot/home/stage/
 ssh haiku 'cd /boot/home/stage && pkgman install -y ./haiku-*-6-arm64.hpkg ./haiku_devel-*-6-arm64.hpkg && shutdown -r'
 ```
 
+Revision 7 adds a **Dark mode** check box to the Colors tab of the Appearance
+preferences. Haiku already ships a complete dark color set (the dark variant of
+its defaults) but had no switch for it. Only the Appearance app changes:
+
+```sh
+docker exec haiku-bfs bash /repo/scripts/container/build-haiku-darkmode.sh  # ~1 min
+scp out/haiku-system/*-7-arm64.hpkg haiku:/boot/home/stage/
+ssh haiku 'cd /boot/home/stage && pkgman install -y ./haiku-*-7-arm64.hpkg ./haiku_devel-*-7-arm64.hpkg && shutdown -r'
+```
+
+Revision 8 fixes the **mouse wheel in terminal apps**. Terminal turned every
+wheel step in a full-screen app into three Up/Down arrow keys, even when the
+app had asked for mouse events, so scrolling a cmux pane walked through the
+shell history. With mouse reporting on, Terminal now sends xterm's wheel
+buttons instead. Only the Terminal app changes:
+
+```sh
+docker exec haiku-bfs bash /repo/scripts/container/build-haiku-wheel.sh     # ~1 min
+scp out/haiku-system/*-8-arm64.hpkg haiku:/boot/home/stage/
+ssh haiku 'cd /boot/home/stage && pkgman install -y ./haiku-*-8-arm64.hpkg ./haiku_devel-*-8-arm64.hpkg && shutdown -r'
+```
+
 ## 12. Extra packages (diff, tar, xz, zstd, zip, nano, cmake, ninja, …)
 
 Prebuilt in the [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages)

@@ -1,0 +1,157 @@
+diff --git a/src/preferences/appearance/Colors.cpp b/src/preferences/appearance/Colors.cpp
+index 7c6e8dc2..8a4c31cb 100644
+--- a/src/preferences/appearance/Colors.cpp
++++ b/src/preferences/appearance/Colors.cpp
+@@ -111,6 +111,20 @@ get_default_colors(BMessage* message)
+ }
+ 
+ 
++void
++get_system_colors(BMessage* message, bool dark)
++{
++	if (message == NULL)
++		return;
++
++	for (int32 index = 0; index < kColorWhichCount; ++index) {
++		color_which which = index_to_color_which(index);
++		message->AddColor(ui_color_name(which),
++			BPrivate::GetSystemColor(which, dark));
++	}
++}
++
++
+ void
+ get_current_colors(BMessage* message)
+ {
+diff --git a/src/preferences/appearance/Colors.h b/src/preferences/appearance/Colors.h
+index 5d0e2bab..c81fcc8a 100644
+--- a/src/preferences/appearance/Colors.h
++++ b/src/preferences/appearance/Colors.h
+@@ -23,6 +23,7 @@ typedef struct {
+ const ColorDescription* get_color_description(int32 index);
+ int32 color_description_count(void);
+ void get_default_colors(BMessage* storage);
++void get_system_colors(BMessage* storage, bool dark);
+ void get_current_colors(BMessage* storage);
+ 
+ 
+diff --git a/src/preferences/appearance/ColorsView.cpp b/src/preferences/appearance/ColorsView.cpp
+index 625c3e6d..95efa96e 100644
+--- a/src/preferences/appearance/ColorsView.cpp
++++ b/src/preferences/appearance/ColorsView.cpp
+@@ -41,6 +41,7 @@
+ #define AUTO_ADJUST_CHANGED 'madj'
+ #define UPDATE_COLOR 'upcl'
+ #define ATTRIBUTE_CHOSEN 'atch'
++#define DARK_MODE_CHANGED 'drkm'
+ 
+ using BPrivate::BColorItem;
+ using BPrivate::BColorListView;
+@@ -55,6 +56,11 @@ ColorsView::ColorsView(const char* name)
+ 
+ 	LoadSettings();
+ 
++	// Switches all colors between the built-in light and dark sets
++	fDarkModeCheckBox = new BCheckBox(B_TRANSLATE("Dark mode"),
++		new BMessage(DARK_MODE_CHANGED));
++	_UpdateDarkModeCheckBox();
++
+ 	fAutoSelectCheckBox = new BCheckBox(B_TRANSLATE("Automatically pick secondary colors"),
+ 		new BMessage(AUTO_ADJUST_CHANGED));
+ 	fAutoSelectCheckBox->SetValue(true);
+@@ -73,6 +79,7 @@ ColorsView::ColorsView(const char* name)
+ 		"picker", new BMessage(UPDATE_COLOR));
+ 
+ 	BLayoutBuilder::Group<>(this, B_VERTICAL)
++		.Add(fDarkModeCheckBox)
+ 		.Add(fAutoSelectCheckBox)
+ 		.Add(fScrollView, 10.0)
+ 		.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING)
+@@ -95,6 +102,7 @@ ColorsView::~ColorsView()
+ void
+ ColorsView::AttachedToWindow()
+ {
++	fDarkModeCheckBox->SetTarget(this);
+ 	fAutoSelectCheckBox->SetTarget(this);
+ 	fPicker->SetTarget(this);
+ 	fAttrList->SetTarget(this);
+@@ -169,6 +177,10 @@ ColorsView::MessageReceived(BMessage* message)
+ 			break;
+ 		}
+ 
++		case DARK_MODE_CHANGED:
++			_SetDarkMode(fDarkModeCheckBox->Value() == B_CONTROL_ON);
++			break;
++
+ 		default:
+ 			BView::MessageReceived(message);
+ 			break;
+@@ -283,6 +295,36 @@ ColorsView::_SetUIColors(const BMessage& colors)
+ {
+ 	set_ui_colors(&colors);
+ 	fCurrentColors = colors;
++	_UpdateDarkModeCheckBox();
++}
++
++
++void
++ColorsView::_SetDarkMode(bool dark)
++{
++	BMessage colors;
++	get_system_colors(&colors, dark);
++	// the desktop color is set in Backgrounds, leave it alone
++	colors.SetColor(ui_color_name(B_DESKTOP_COLOR), ui_color(B_DESKTOP_COLOR));
++
++	_SetUIColors(colors);
++	_UpdatePreviews(colors);
++
++	rgb_color color = colors.GetColor(ui_color_name(fWhich), make_color(255, 0, 255));
++	fPicker->SetValue(color);
++	fColorPreview->SetColor(color);
++	fColorPreview->Invalidate();
++
++	Window()->PostMessage(kMsgUpdate);
++}
++
++
++void
++ColorsView::_UpdateDarkModeCheckBox()
++{
++	const rgb_color panel = fCurrentColors.GetColor(
++		ui_color_name(B_PANEL_BACKGROUND_COLOR), ui_color(B_PANEL_BACKGROUND_COLOR));
++	fDarkModeCheckBox->SetValue(panel.IsDark() ? B_CONTROL_ON : B_CONTROL_OFF);
+ }
+ 
+ 
+@@ -315,6 +357,7 @@ ColorsView::_SetColor(color_which which, rgb_color color)
+ 	if (!fAutoSelectCheckBox->Value()) {
+ 		if (ui_color(which) != color)
+ 			set_ui_color(which, color);
++		_UpdateDarkModeCheckBox();
+ 		return;
+ 	}
+ 
+@@ -430,4 +473,5 @@ ColorsView::_SetColor(color_which which, rgb_color color)
+ 		fCurrentColors.SetColor(ui_color_name(B_FAILURE_COLOR), failure.to_rgb());
+ 	}
+ 	set_ui_colors(&fCurrentColors);
++	_UpdateDarkModeCheckBox();
+ }
+diff --git a/src/preferences/appearance/ColorsView.h b/src/preferences/appearance/ColorsView.h
+index 4e071e8c..5f4882fc 100644
+--- a/src/preferences/appearance/ColorsView.h
++++ b/src/preferences/appearance/ColorsView.h
+@@ -56,10 +56,13 @@ private:
+ 			void				_SetColor(color_which which, rgb_color color);
+ 			void				_SetCurrentColor(rgb_color color);
+ 			void				_SetUIColors(const BMessage& colors);
++			void				_SetDarkMode(bool dark);
++			void				_UpdateDarkModeCheckBox();
+ 
+ private:
+ 			BColorControl*		fPicker;
+ 
++			BCheckBox*			fDarkModeCheckBox;
+ 			BCheckBox*			fAutoSelectCheckBox;
+ 			BListView*			fAttrList;
+ 

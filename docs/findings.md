@@ -10,6 +10,16 @@ and what worked. Tested with Haiku hrev60290 (2026-10-21), UTM 5.0.8, QEMU
 then app_server loops `Failed to initialize virtual screen configuration`.
 → Use **`virtio-gpu-pci`**. Haiku ships a `virtio_gpu` driver and accelerant.
 
+**`virtio-gpu-gl-pci` ("GPU Supported") boots fine, but only as a 2D display.**
+QEMU runs with `-device virtio-gpu-gl-pci` and `gl=es`, Haiku's `virtio_gpu`
+driver binds and sets 2048x1152 from EDID, and the desktop shows in the UTM
+window (tested 2026-10-23). There is no 3D: the driver only negotiates
+`VIRTIO_GPU_F_EDID`, never `VIRTIO_GPU_F_VIRGL`, and Haiku arm64 has no Mesa.
+Its `viogpu.h` already declares the 3D commands (`CTX_CREATE`, `SUBMIT_3D`, …),
+but nothing uses them. To get guest OpenGL through virgl → ANGLE → Metal, you'd
+need virgl in the kernel driver plus a Mesa virgl Gallium driver with a Haiku
+back-end.
+
 **Disk dies mid-boot with `virtio-net-pci`.** Right after
 `publish device: ... net/virtio/0`, virtio_block starts failing:
 `packagefs: ReadFileData(...) failed to read data: I/O error` and
@@ -42,6 +52,19 @@ for real touchpads. → `haiku` rev 6 adds **Natural scrolling** for mice and
 tablets (Input preferences, mouse page; on by default):
 `patches/haiku/mouse-natural-scrolling.patch`, `build-haiku-natscroll.sh`.
 The input_server keeps it per device in `~/config/settings/Mouse_settings`.
+
+**The wheel acts like Up/Down keys in full-screen terminal apps.** In the
+alternate screen, Haiku's Terminal turned each wheel step into three arrow
+keys, even when the app had turned on mouse reporting (`ESC[?1000h` and
+friends). Scrolling a cmux pane moved through bash history instead. → `haiku`
+rev 8 sends xterm's wheel buttons 4/5 (`ESC[<64;x;yM` / `ESC[<65;x;yM`, or the
+legacy encoding) while mouse reporting is on; without it, nothing changes:
+`patches/haiku/terminal-mouse-wheel.patch`, `build-haiku-wheel.sh`.
+
+**`pkgman` installs can wait for the next boot.** After a `haiku` install
+reports "A reboot is necessary", later installs in the same boot are queued
+too, and a package whose files are in use isn't swapped live either.
+`catattr SYS:PACKAGE_FILE <file>` shows which package a file currently comes from.
 
 **Input automation**: `input mouse click (vm) at {x, y}` (guest pixels),
 `input keystroke (vm) text "..."` and `input scan code (vm) codes {...}`
@@ -282,9 +305,10 @@ arm64 libiconv package. CMake's bundled libarchive stops with
 
 **`pkgman update` can undo the local system packages.** The Haiku repo
 (`haiku/master/arm64/current`) is real and moves with the nightlies. Once it
-serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-6`, and an
+serves a newer hrev, `haiku-…-hrev603xx-1` sorts above `hrev60290-8`, and an
 update would install the stock package again, without TLS, PSCI shutdown, the TCP
-fixes, natural scrolling or the Chromium fixes.
+fixes, natural scrolling, the dark mode switch, the Terminal wheel fix or the
+Chromium fixes.
 `rchromium` requires `haiku_rchromium_fixes`, so the solver should balk, but
 check the plan before saying yes. To move to a newer hrev, rebuild the system
 packages from it.

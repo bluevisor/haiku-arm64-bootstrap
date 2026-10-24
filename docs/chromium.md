@@ -11,9 +11,12 @@ Haiku platform code for base/content/media/V8). Building Chromium yourself is
 a much larger job: a clang toolchain for Haiku, 100+ GB, many hours. Their
 port notes cover it.
 
-That repository has **no license file**, so this repo does not redistribute
-their packages or anything repacked from them. Fetch them from their
-repository yourself.
+The port is **BSD-3-Clause, Chromium's license.** Its repository has no
+top-level LICENSE file, so GitHub lists it as unlicensed. Its sources carry
+Chromium's BSD header, though, and its package metadata declares
+`BSD (3-clause)`. This repo doesn't mirror their packages: fetch them from
+their repository. For the full `//chrome` browser built on the same port, see
+[haiku-arm64-chromium](https://github.com/bluevisor/haiku-arm64-chromium).
 
 ## 1. The system fixes (`haiku_rchromium_fixes`)
 
