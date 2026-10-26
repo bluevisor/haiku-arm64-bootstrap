@@ -11,6 +11,10 @@
 # scripts/container/build-bfs-shell.sh (CONTAINER, repo mounted at /repo).
 # QEMU_IMG may point at any qemu-img (see scripts/host/qemu-img-shim.c for using
 # the copy bundled inside UTM.app).
+# Space: needs about two disk copies free on the Mac (raw + new qcow2), and the
+# $disk.bak clone stops being free once $disk is replaced. Don't put scratch copies in
+# the container's /build: colima's disk is a sparse file on the BACKUP drive, and filling
+# that drive gives the VM ext4 I/O errors and shuts colima down.
 set -euo pipefail
 disk=$1
 size=$2
@@ -46,15 +50,25 @@ PY
 )
 echo "BFS partition: offset $start_bytes, new filesystem size $fs_bytes bytes"
 
+# The long-lived container mounts the repo read-only, and bfs_shell then "resizes" nothing
+# ("tried to get writable block on a read-only cache!"). Run a throwaway copy of it with
+# out/ mounted writable instead.
+docker commit "$CONTAINER" "$CONTAINER:grow" >/dev/null
+trap 'docker rmi "$CONTAINER:grow" >/dev/null 2>&1 || true' EXIT
 run_bfs() {
-	docker exec -i "$CONTAINER" "$BFS_SHELL" --start-offset "$start_bytes" --end-offset "$disk_bytes" "/repo/$raw"
+	docker run --rm -i --volumes-from "$CONTAINER" -v "$PWD/out:/out" "$CONTAINER:grow" \
+		"$BFS_SHELL" --start-offset "$start_bytes" --end-offset "$disk_bytes" "/out/${raw#out/}"
 }
 printf 'resizefs -n %s\nquit\n' "$fs_bytes" | run_bfs | tail -1
-printf 'resizefs %s\nsync\nquit\n' "$fs_bytes" | run_bfs | grep -a -E 'resized|failed|Error' || true
+printf 'resizefs %s\nsync\nquit\n' "$fs_bytes" | run_bfs | tr '\r' '\n' | grep -a -q 'successfully resized' \
+	|| { echo "!! resizefs failed; $raw left in place, original disk untouched" >&2; exit 1; }
 # "Unmounting FS failed: Device or resource busy" after a successful resize is harmless.
 printf 'checkfs\ninfo\nquit\n' | run_bfs | grep -a -E 'blocks (not allocated|already set|could be freed)|total size|free size'
 
 "$QEMU_IMG" convert -O qcow2 "$raw" "$disk.new"
 mv "$disk.new" "$disk"
 rm -f "$raw"
+# colima's virtiofs keeps deleted files open, so the raw image's space is not returned
+# until the VM drops it: `colima ssh -- sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'`,
+# or `colima restart` if `lsof +L1 | grep grow-disk` still lists it.
 echo "done: $disk"
