@@ -472,6 +472,17 @@ denied") until `PermitRootLogin yes`; keys still work.
 - With `-Ddont_use_nlink` (BFS link counts), `installperl` copies `bin/perl` and
   `bin/perlthanks` as 0644, so you get "Permission denied" until chmod 755.
 
+**No unwind tables for C on Haiku arm64.** The native gcc doesn't default to
+`-fasynchronous-unwind-tables` (`gcc -Q --help=common`), unlike x86_64 and
+aarch64-linux. A C library built without it has no FDEs (its `.eh_frame` is
+only crtendS's 4-byte terminator, so ld rightly emits no `.eh_frame_hdr`).
+Any C++ exception thrown through it from a callback ends in `terminate()`.
+PNGTranslator's `png_error` handler throws through libpng, so Tracker's
+thumbnailer aborted on every undecodable PNG. Build C libraries with
+`-fasynchronous-unwind-tables`. Testing tip: Haiku's loader reads
+`LIBRARY_PATH`, not `LD_LIBRARY_PATH` (a missing library just exits with rc=3),
+and at `-O2` the C call can become a tail call that hides the bug.
+
 ## Rust (`aarch64-unknown-haiku`)
 
 Upstream rustc has only i686/x86_64 Haiku targets. Adding the target is ~25
