@@ -1,0 +1,265 @@
+From 98bcdb69ffa1948f685cf0a641b0cca3be60e498 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Mon, 26 Oct 2026 23:21:26 -0700
+Subject: [PATCH] PNGTranslator: decode PNGs whose IDAT layout does not match
+ IHDR
+
+When libpng rejects an image, retry with a small decoder that inflates
+the IDAT data itself and infers the real layout from its size: 3 or 4
+bytes per pixel, with or without per-row filter bytes. A constant first
+or last byte is treated as padding (xRGB / RGBx), otherwise the last
+byte is alpha. Some screenshot tools write raw 4-byte pixels without
+filter bytes under a plain 8-bit RGB header; libpng fails those with
+'bad adaptive filter value' and macOS renders them sheared.
+---
+ src/add-ons/translators/png/PNGTranslator.cpp | 217 +++++++++++++++++-
+ 1 file changed, 214 insertions(+), 3 deletions(-)
+
+diff --git a/src/add-ons/translators/png/PNGTranslator.cpp b/src/add-ons/translators/png/PNGTranslator.cpp
+index 420e03b1..31236890 100644
+--- a/src/add-ons/translators/png/PNGTranslator.cpp
++++ b/src/add-ons/translators/png/PNGTranslator.cpp
+@@ -34,12 +34,18 @@
+ #include "PNGTranslator.h"
+ 
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
++#include <syslog.h>
+ 
+ #include <Catalog.h>
+ #include <OS.h>
+ #define PNG_NO_PEDANTIC_WARNINGS
+ #include <png.h>
++#include <zlib.h>
++
++#include <new>
++#include <vector>
+ 
+ #include "PNGView.h"
+ 
+@@ -509,13 +515,218 @@ PNGTranslator::translate_from_png_to_bits(BPositionIO *inSource,
+ 	return result;
+ }
+ 
++
++// #pragma mark - tolerant decoding
++
++
++/*!	Some tools write PNGs whose IDAT data does not match the IHDR: most often
++	raw 4-byte pixels (xRGB or RGBA) without per-row filter bytes under a
++	plain 8-bit RGB header. libpng rightly rejects those ("bad adaptive filter
++	value"). This decoder takes over when libpng fails: it inflates the IDAT
++	data itself, infers the real layout from its size, and writes a normal
++	B_RGBA32 bitmap. Only non-interlaced 8-bit RGB/RGBA images are handled.
++*/
++static uint8
++paeth(uint8 a, uint8 b, uint8 c)
++{
++	int p = a + b - c;
++	int pa = abs(p - a), pb = abs(p - b), pc = abs(p - c);
++	if (pa <= pb && pa <= pc)
++		return a;
++	return pb <= pc ? b : c;
++}
++
++
++static bool
++unfilter_rows(const uint8* data, uint8* out, uint32 rowBytes, uint32 height,
++	uint32 bpp)
++{
++	for (uint32 y = 0; y < height; y++) {
++		const uint8* in = data + y * (rowBytes + 1);
++		uint8 filter = *in++;
++		uint8* row = out + y * rowBytes;
++		const uint8* prev = y > 0 ? row - rowBytes : NULL;
++		for (uint32 x = 0; x < rowBytes; x++) {
++			uint8 a = x >= bpp ? row[x - bpp] : 0;
++			uint8 b = prev != NULL ? prev[x] : 0;
++			uint8 c = prev != NULL && x >= bpp ? prev[x - bpp] : 0;
++			switch (filter) {
++				case 0: row[x] = in[x]; break;
++				case 1: row[x] = in[x] + a; break;
++				case 2: row[x] = in[x] + b; break;
++				case 3: row[x] = in[x] + ((a + b) >> 1); break;
++				case 4: row[x] = in[x] + paeth(a, b, c); break;
++				default: return false;
++			}
++		}
++	}
++	return true;
++}
++
++
++static status_t
++translate_mismatched_png_to_bits(BPositionIO* inSource,
++	BPositionIO* outDestination)
++{
++	// read the whole file; these are screenshots, not gigapixel images
++	std::vector<uint8> file;
++	uint8 buffer[65536];
++	ssize_t bytesRead;
++	while ((bytesRead = inSource->Read(buffer, sizeof(buffer))) > 0) {
++		file.insert(file.end(), buffer, buffer + bytesRead);
++		if (file.size() > 256 * 1024 * 1024)
++			return B_NO_TRANSLATOR;
++	}
++	if (file.size() < 8 + 25 || memcmp(file.data(), "\x89PNG\r\n\x1a\n", 8) != 0)
++		return B_NO_TRANSLATOR;
++
++	uint32 width = 0, height = 0;
++	uint8 depth = 0, colorType = 0, interlace = 0;
++	std::vector<uint8> idat;
++	size_t pos = 8;
++	while (pos + 12 <= file.size()) {
++		const uint8* chunk = file.data() + pos;
++		uint32 length = (chunk[0] << 24) | (chunk[1] << 16) | (chunk[2] << 8)
++			| chunk[3];
++		if (pos + 12 + length > file.size())
++			break;
++		const uint8* body = chunk + 8;
++		if (memcmp(chunk + 4, "IHDR", 4) == 0 && length >= 13) {
++			width = (body[0] << 24) | (body[1] << 16) | (body[2] << 8) | body[3];
++			height = (body[4] << 24) | (body[5] << 16) | (body[6] << 8)
++				| body[7];
++			depth = body[8];
++			colorType = body[9];
++			interlace = body[12];
++		} else if (memcmp(chunk + 4, "IDAT", 4) == 0)
++			idat.insert(idat.end(), body, body + length);
++		else if (memcmp(chunk + 4, "IEND", 4) == 0)
++			break;
++		pos += 12 + length;
++	}
++	if (width == 0 || height == 0 || width > 32768 || height > 32768
++		|| depth != 8 || (colorType != 2 && colorType != 6) || interlace != 0
++		|| idat.empty()) {
++		return B_NO_TRANSLATOR;
++	}
++
++	// inflate up to the largest layout we understand (4 bpp + filter bytes)
++	size_t maxSize = (size_t)height * (width * 4 + 1);
++	std::vector<uint8> raw(maxSize + 1);
++	z_stream stream = {};
++	if (inflateInit(&stream) != Z_OK)
++		return B_NO_TRANSLATOR;
++	stream.next_in = idat.data();
++	stream.avail_in = idat.size();
++	stream.next_out = raw.data();
++	stream.avail_out = raw.size();
++	int zstatus = inflate(&stream, Z_FINISH);
++	size_t rawSize = stream.total_out;
++	inflateEnd(&stream);
++	if (zstatus != Z_STREAM_END)
++		return B_NO_TRANSLATOR;
++
++	uint32 bpp = 0;
++	bool filtered = false;
++	for (uint32 candidate = 3; candidate <= 4 && bpp == 0; candidate++) {
++		if (rawSize == (size_t)height * (width * candidate + 1)) {
++			bpp = candidate;
++			filtered = true;
++		} else if (rawSize == (size_t)height * width * candidate)
++			bpp = candidate;
++	}
++	if (bpp == 0)
++		return B_NO_TRANSLATOR;
++
++	uint32 rowBytes = width * bpp;
++	std::vector<uint8> pixels;
++	const uint8* source = raw.data();
++	if (filtered) {
++		pixels.resize((size_t)rowBytes * height);
++		if (!unfilter_rows(raw.data(), pixels.data(), rowBytes, height, bpp))
++			return B_NO_TRANSLATOR;
++		source = pixels.data();
++	}
++
++	// For 4 bytes per pixel, a byte that never changes is padding: first
++	// means xRGB, last means RGBx. Otherwise treat the last byte as alpha.
++	int padding = -1;
++	bool alpha = false;
++	if (bpp == 4) {
++		bool constant[4] = { true, true, true, true };
++		size_t count = (size_t)width * height;
++		size_t step = count > 65536 ? count / 65536 : 1;
++		for (size_t i = step; i < count; i += step) {
++			for (int k = 0; k < 4; k++) {
++				if (source[i * 4 + k] != source[k])
++					constant[k] = false;
++			}
++		}
++		if (constant[0] && !constant[3])
++			padding = 0;
++		else if (constant[3])
++			padding = 3;
++		else
++			alpha = true;
++	}
++	int red = padding == 0 ? 1 : 0;
++
++	TranslatorBitmap header;
++	header.magic = B_TRANSLATOR_BITMAP;
++	header.bounds.Set(0, 0, width - 1, height - 1);
++	header.rowBytes = 4 * width;
++	header.colors = alpha ? B_RGBA32 : B_RGB32;
++	header.dataSize = header.rowBytes * height;
++	if (swap_data(B_UINT32_TYPE, &header, sizeof(TranslatorBitmap),
++			B_SWAP_HOST_TO_BENDIAN) != B_OK) {
++		return B_ERROR;
++	}
++	outDestination->Write(&header, sizeof(TranslatorBitmap));
++
++	std::vector<uint8> row(4 * width);
++	for (uint32 y = 0; y < height; y++) {
++		const uint8* in = source + (size_t)y * rowBytes;
++		for (uint32 x = 0; x < width; x++, in += bpp) {
++			row[x * 4 + 0] = in[red + 2];
++			row[x * 4 + 1] = in[red + 1];
++			row[x * 4 + 2] = in[red];
++			row[x * 4 + 3] = alpha ? in[3] : 255;
++		}
++		if (outDestination->Write(row.data(), row.size()) != (ssize_t)row.size())
++			return B_ERROR;
++	}
++
++	syslog(LOG_INFO, "PNGTranslator: decoded mismatched PNG (%ux%u, %u bpp, "
++		"%sfilter bytes)", width, height, bpp, filtered ? "" : "no ");
++	return B_OK;
++}
++
+ status_t
+ PNGTranslator::translate_from_png(BPositionIO *inSource, uint32 outType,
+ 	BPositionIO *outDestination)
+ {
+-	if (outType == B_TRANSLATOR_BITMAP)
+-		return translate_from_png_to_bits(inSource, outDestination);
+-	else {
++	if (outType == B_TRANSLATOR_BITMAP) {
++		off_t sourceStart = inSource->Position();
++		off_t destinationStart = outDestination->Position();
++		status_t status = translate_from_png_to_bits(inSource, outDestination);
++		if (status == B_OK || status == B_NO_MEMORY || sourceStart < 0
++			|| destinationStart < 0) {
++			return status;
++		}
++
++		// libpng gave up; drop its partial output and try harder
++		if (inSource->Seek(sourceStart, SEEK_SET) != sourceStart
++			|| outDestination->Seek(destinationStart, SEEK_SET)
++				!= destinationStart) {
++			return status;
++		}
++		outDestination->SetSize(destinationStart);
++		if (translate_mismatched_png_to_bits(inSource, outDestination)
++				== B_OK) {
++			return B_OK;
++		}
++		return status;
++	} else {
+ 		// Translate from PNG to PNG
+ 		translate_direct_copy(inSource, outDestination);
+ 		return B_OK;
+-- 
+2.54.0 (Apple Git-157)
+
