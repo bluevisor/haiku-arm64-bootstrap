@@ -1,0 +1,175 @@
+From 185a123ad79f80fe12092d3c206532cb5f2ac300 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Mon, 26 Oct 2026 22:03:54 -0700
+Subject: [PATCH] virtio_gpu: report host display changes to userland
+
+Handle the VIRTIO_GPU_EVENT_DISPLAY config interrupt and add
+VIRTIO_GPU_3D_WAIT_DISPLAY on the render node: it blocks until the host
+changes the preferred display size (or a timeout), acks the event and
+returns the new size. The SPICE guest agent uses it to follow the UTM
+window size.
+---
+ .../private/graphics/virtio/virtio_gpu_3d.h   | 13 +++
+ .../drivers/graphics/virtio/virtio_gpu.cpp    | 87 ++++++++++++++++++-
+ 2 files changed, 99 insertions(+), 1 deletion(-)
+
+diff --git a/headers/private/graphics/virtio/virtio_gpu_3d.h b/headers/private/graphics/virtio/virtio_gpu_3d.h
+index da0df530..88a3cf79 100644
+--- a/headers/private/graphics/virtio/virtio_gpu_3d.h
++++ b/headers/private/graphics/virtio/virtio_gpu_3d.h
+@@ -42,6 +42,19 @@ enum {
+ 	VIRTIO_GPU_3D_EXECBUFFER,
+ 	VIRTIO_GPU_3D_FENCE_BIND,
+ 	VIRTIO_GPU_3D_FENCE_WAIT,
++	VIRTIO_GPU_3D_WAIT_DISPLAY,
++};
++
++
++/* WAIT_DISPLAY: blocks until the host changes the preferred display size
++   (VIRTIO_GPU_EVENT_DISPLAY) or the timeout runs out, then returns the
++   host's preferred size for scanout 0. A negative timeout returns at once. */
++struct virtio_gpu_3d_wait_display {
++	bigtime_t	timeout;
++	uint32		width;
++	uint32		height;
++	uint32		changed;
++	uint32		pad;
+ };
+ 
+ 
+diff --git a/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp b/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
+index c81d8a54..a9979b25 100644
+--- a/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
++++ b/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
+@@ -98,6 +98,9 @@ struct virtio_gpu_driver_info {
+ 	sem_id					completionSem;
+ 	thread_id				completionThread;
+ 
++	// released by the config interrupt on VIRTIO_GPU_EVENT_DISPLAY
++	sem_id					displayChangeSem;
++
+ 	// serializes the display commands
+ 	mutex					commandLock;
+ 
+@@ -958,6 +961,38 @@ virtio_gpu_hostmem_free(virtio_gpu_driver_info* info, uint64 offset)
+ }
+ 
+ 
++static void
++virtio_gpu_config_changed(void* cookie)
++{
++	virtio_gpu_driver_info* info = (virtio_gpu_driver_info*)cookie;
++	if (info->displayChangeSem >= 0)
++		release_sem_etc(info->displayChangeSem, 1, B_DO_NOT_RESCHEDULE);
++}
++
++
++/*!	Reads the host's preferred size for scanout 0 without touching the
++	current display state. Caller must hold commandLock.
++*/
++static status_t
++virtio_gpu_query_display_size(virtio_gpu_driver_info* info, uint32* width,
++	uint32* height)
++{
++	struct virtio_gpu_ctrl_hdr hdr = {};
++	struct virtio_gpu_resp_display_info displayInfo = {};
++	hdr.type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
++
++	virtio_gpu_send_cmd(info, &hdr, sizeof(hdr), &displayInfo,
++		sizeof(displayInfo));
++	if (displayInfo.hdr.type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO
++		|| !displayInfo.pmodes[0].enabled)
++		return B_ERROR;
++
++	*width = displayInfo.pmodes[0].r.width;
++	*height = displayInfo.pmodes[0].r.height;
++	return B_OK;
++}
++
++
+ static status_t
+ virtio_gpu_init_hw(virtio_gpu_driver_info* info)
+ {
+@@ -1010,7 +1045,9 @@ virtio_gpu_init_hw(virtio_gpu_driver_info* info)
+ 	resume_thread(info->completionThread);
+ 
+ 	// Setup interrupt
+-	status = info->virtio->setup_interrupt(info->virtio_device, NULL, info);
++	info->displayChangeSem = create_sem(0, "virtio_gpu display change");
++	status = info->virtio->setup_interrupt(info->virtio_device,
++		virtio_gpu_config_changed, info);
+ 	if (status != B_OK) {
+ 		ERROR("interrupt setup failed (%s)\n", strerror(status));
+ 		goto err3;
+@@ -1035,6 +1072,8 @@ virtio_gpu_init_hw(virtio_gpu_driver_info* info)
+ err4:
+ 	info->virtio->free_interrupts(info->virtio_device);
+ err3:
++	delete_sem(info->displayChangeSem);
++	info->displayChangeSem = -1;
+ 	{
+ 		delete_sem(info->completionSem);
+ 		status_t result;
+@@ -1061,6 +1100,8 @@ virtio_gpu_uninit_hw(virtio_gpu_driver_info* info)
+ 		return;
+ 
+ 	info->virtio->free_interrupts(info->virtio_device);
++	delete_sem(info->displayChangeSem);
++	info->displayChangeSem = -1;
+ 
+ 	delete_sem(info->completionSem);
+ 	status_t result;
+@@ -2087,6 +2128,50 @@ virtio_gpu_render_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
+ 				return status;
+ 			return virtio_gpu_render_fence_wait(file, args);
+ 		}
++
++		case VIRTIO_GPU_3D_WAIT_DISPLAY:
++		{
++			virtio_gpu_3d_wait_display args;
++			if ((status = virtio_gpu_copy_args(args, buffer, length)) != B_OK)
++				return status;
++
++			args.changed = 0;
++			if (args.timeout >= 0) {
++				status = acquire_sem_etc(info->displayChangeSem, 1,
++					B_CAN_INTERRUPT | B_RELATIVE_TIMEOUT, args.timeout);
++				if (status == B_INTERRUPTED)
++					return status;
++				if (status == B_OK) {
++					// Coalesce a burst of resize events into one answer.
++					int32 count;
++					if (get_sem_count(info->displayChangeSem, &count) == B_OK
++						&& count > 0) {
++						acquire_sem_etc(info->displayChangeSem, count,
++							B_RELATIVE_TIMEOUT, 0);
++					}
++					args.changed = 1;
++				}
++			}
++
++			uint32 events = 0;
++			info->virtio->read_device_config(info->virtio_device,
++				offsetof(struct virtio_gpu_config, events_read), &events,
++				sizeof(events));
++			if (events != 0) {
++				info->virtio->write_device_config(info->virtio_device,
++					offsetof(struct virtio_gpu_config, events_clear), &events,
++					sizeof(events));
++			}
++
++			{
++				MutexLocker commandLocker(&info->commandLock);
++				status = virtio_gpu_query_display_size(info, &args.width,
++					&args.height);
++			}
++			if (status != B_OK)
++				return status;
++			return user_memcpy(buffer, &args, sizeof(args));
++		}
+ 	}
+ 
+ 	return B_DEV_INVALID_IOCTL;
+-- 
+2.54.0 (Apple Git-157)
+
