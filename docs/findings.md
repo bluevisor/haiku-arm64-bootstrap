@@ -389,6 +389,19 @@ layout from the data size.
 
 **The `ps` output** is `Team(path+args) Id #Threads Gid Uid`, with no ppid.
 
+**Running a patched system library for one app only.** launch_daemon builds a
+job's environment as its own inherited environment first, then the target's,
+then the job's `env {}`. The first `LIBRARY_PATH` wins, so a job `env` can't
+override it. The inherited path does start with `%A/lib`, so run a copy of the
+app from a folder whose `lib/` holds the patched library, and point the job at
+it from a user launch file (`~/config/settings/launch/<name>`:
+`service x-vnd.Be-TRAK { launch /path/to/copy }`; a user definition replaces
+`launch`). Tracker's Quick Look build uses this.
+
+**`hey Tracker quit` hangs.** Tracker refuses the quit and never replies, so
+`hey` waits forever, which looks like a frozen desktop. To restart Tracker,
+`kill -9` its team; launch_daemon restarts the service.
+
 ## Disk growth (BFS)
 
 **`resizefs /boot <size>` → `The disk system does not support resizing.`**
