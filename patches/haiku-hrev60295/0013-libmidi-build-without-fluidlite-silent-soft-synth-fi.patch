@@ -1,0 +1,120 @@
+From 363c80c74ed9f0b377f0caf0f52574c15d49cd27 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Mon, 26 Oct 2026 16:12:23 +0000
+Subject: [PATCH] libmidi: build without fluidlite (silent soft synth); fix
+ WonderBrushTranslator include path
+
+arm64 has no fluidlite port, so libmidi was skipped and the regular
+profile failed on MidiPlayer and the Media preflet. Build it with a
+no-op fluidlite.h instead: MIDI ports and settings work, BSoftSynth has
+no synthesizer. WonderBrushTranslator includes headers from its
+support/ folder, which was only on the source search path.
+---
+ src/add-ons/translators/wonderbrush/Jamfile |  1 +
+ src/kits/midi/Jamfile                       | 22 +++++++-----
+ src/kits/midi/nofluid/fluidlite.h           | 39 +++++++++++++++++++++
+ 3 files changed, 53 insertions(+), 9 deletions(-)
+ create mode 100644 src/kits/midi/nofluid/fluidlite.h
+
+diff --git a/src/add-ons/translators/wonderbrush/Jamfile b/src/add-ons/translators/wonderbrush/Jamfile
+index 45bc59b4..14b1a0dd 100644
+--- a/src/add-ons/translators/wonderbrush/Jamfile
++++ b/src/add-ons/translators/wonderbrush/Jamfile
+@@ -1,6 +1,7 @@
+ SubDir HAIKU_TOP src add-ons translators wonderbrush ;
+ 
+ SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) shared ] ;
++SubDirHdrs [ FDirName $(SUBDIR) support ] ;
+ 
+ AddResources WonderBrushTranslator : WonderBrushTranslator.rdef ;
+ 
+diff --git a/src/kits/midi/Jamfile b/src/kits/midi/Jamfile
+index 22483f7e..61c5eba0 100644
+--- a/src/kits/midi/Jamfile
++++ b/src/kits/midi/Jamfile
+@@ -6,15 +6,20 @@ UsePrivateHeaders midi ;
+ local architectureObject ;
+ for architectureObject in [ MultiArchSubDirSetup ] {
+ 	on $(architectureObject) {
+-		if ! [ FIsBuildFeatureEnabled fluidlite ] {
+-			continue ;
++		local synthLibs ;
++		if [ FIsBuildFeatureEnabled fluidlite ] {
++			UseBuildFeatureHeaders fluidlite ;
++			Includes [ FGristFiles MidiSynth.cpp MidiSynthFile.cpp
++				SoftSynth.cpp Synth.cpp ]
++				: [ BuildFeatureAttribute fluidlite : headers ] ;
++			synthLibs = [ BuildFeatureAttribute libvorbis : library ]
++				[ BuildFeatureAttribute fluidlite : library ] ;
++		} else {
++			# No fluidlite (arm64): build the kit with a silent soft synth so
++			# MIDI ports, settings and the apps that link libmidi still work.
++			SubDirSysHdrs [ FDirName $(SUBDIR) nofluid ] ;
+ 		}
+ 
+-		UseBuildFeatureHeaders fluidlite ;
+-		Includes [ FGristFiles MidiSynth.cpp MidiSynthFile.cpp
+-			SoftSynth.cpp Synth.cpp ]
+-			: [ BuildFeatureAttribute fluidlite : headers ] ;
+-
+ 		SharedLibrary [ MultiArchDefaultGristFiles libmidi.so ] :
+ 			Midi.cpp
+ 			MidiGlue.cpp
+@@ -31,8 +36,7 @@ for architectureObject in [ MultiArchSubDirSetup ] {
+ 			be
+ 			midi2
+ 			media
+-			[ BuildFeatureAttribute libvorbis : library ]
+-			[ BuildFeatureAttribute fluidlite : library ]
++			$(synthLibs)
+ 			[ TargetLibsupc++ ]
+ 			;
+ 	}
+diff --git a/src/kits/midi/nofluid/fluidlite.h b/src/kits/midi/nofluid/fluidlite.h
+new file mode 100644
+index 00000000..cf2f02c1
+--- /dev/null
++++ b/src/kits/midi/nofluid/fluidlite.h
+@@ -0,0 +1,39 @@
++/*
++ * Stand-in for fluidlite on architectures without it (arm64 has no port).
++ * Every call is a no-op and new_fluid_synth() returns NULL, which
++ * BSoftSynth already treats as "no synthesizer": libmidi still builds and
++ * MIDI ports and settings work, the soft synth is just silent.
++ */
++#ifndef _NOFLUID_FLUIDLITE_H
++#define _NOFLUID_FLUIDLITE_H
++
++typedef struct _fluid_settings_t fluid_settings_t;
++typedef struct _fluid_synth_t fluid_synth_t;
++
++static inline fluid_settings_t* new_fluid_settings(void) { return 0; }
++static inline void delete_fluid_settings(fluid_settings_t*) {}
++static inline int fluid_settings_setnum(fluid_settings_t*, const char*, double)
++	{ return 0; }
++static inline int fluid_settings_setint(fluid_settings_t*, const char*, int)
++	{ return 0; }
++static inline fluid_synth_t* new_fluid_synth(fluid_settings_t*) { return 0; }
++static inline int delete_fluid_synth(fluid_synth_t*) { return 0; }
++static inline int fluid_synth_sfload(fluid_synth_t*, const char*, int)
++	{ return -1; }
++static inline void fluid_synth_set_gain(fluid_synth_t*, float) {}
++static inline float fluid_synth_get_gain(fluid_synth_t*) { return 0; }
++static inline void fluid_synth_set_reverb_on(fluid_synth_t*, int) {}
++static inline void fluid_synth_set_reverb(fluid_synth_t*, double, double,
++	double, double) {}
++static inline int fluid_synth_noteon(fluid_synth_t*, int, int, int)
++	{ return 0; }
++static inline int fluid_synth_noteoff(fluid_synth_t*, int, int) { return 0; }
++static inline int fluid_synth_cc(fluid_synth_t*, int, int, int) { return 0; }
++static inline int fluid_synth_program_change(fluid_synth_t*, int, int)
++	{ return 0; }
++static inline int fluid_synth_pitch_bend(fluid_synth_t*, int, int)
++	{ return 0; }
++static inline int fluid_synth_write_float(fluid_synth_t*, int, void*, int, int,
++	void*, int, int) { return 0; }
++
++#endif
+-- 
+2.39.5
+
