@@ -1,0 +1,41 @@
+From 8a0e462f2b253a9653d699ada225072a16e90698 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Tue, 27 Oct 2026 00:14:49 -0700
+Subject: [PATCH] app_server: remove offscreen windows' event targets
+
+Desktop::RemoveWindow() is what removes a window's event target from the
+EventDispatcher, but it is never called for offscreen (bitmap) windows.
+When a view attached to a BBitmap sets an event mask (BScrollBar does so
+in its constructor), the offscreen window's target is registered as a
+listener and survives the bitmap's deletion. The EventDispatcher then
+dereferences the freed target on the next keyboard or pointer event and
+app_server's event thread crashes (EventDispatcher::_EventLoop ->
+_AddTokens -> BList::ItemAt): input dies and the screen stops redrawing.
+
+Remove the target in ~ServerWindow for offscreen windows as well.
+---
+ src/servers/app/ServerWindow.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/servers/app/ServerWindow.cpp b/src/servers/app/ServerWindow.cpp
+index fd3f262b..fe0ec932 100644
+--- a/src/servers/app/ServerWindow.cpp
++++ b/src/servers/app/ServerWindow.cpp
+@@ -208,6 +208,14 @@ ServerWindow::~ServerWindow()
+ 		fWindowAddedToDesktop = false;
+ 		fDesktop->RemoveWindow(fWindow.Get());
+ 		fDesktop = NULL;
++	} else if (fDesktop != NULL) {
++		// Offscreen (bitmap) windows are never added to the desktop, so
++		// Desktop::RemoveWindow() does not remove their event target. A view
++		// in a bitmap that sets an event mask (BScrollBar does in its
++		// constructor) registers that target with the EventDispatcher, which
++		// then keeps a dangling pointer after the bitmap is deleted and
++		// crashes on the next input event.
++		fDesktop->EventDispatcher().RemoveTarget(fEventTarget);
+ 	}
+ 
+ 	if (App() != NULL) {
+-- 
+2.54.0 (Apple Git-157)
+

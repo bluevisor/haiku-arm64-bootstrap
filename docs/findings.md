@@ -110,6 +110,18 @@ QEMU virt's arm64 FADT is hardware-reduced and has neither.
 
 ## Haiku arm64 system
 
+**White screen that never repaints = app_server's event thread crashed.**
+Check syslog for `entered the debugger: Segment violation` in `BList::ItemAt`
+← `EventDispatcher::_EventLoop`. Cause: a view with an event mask
+(BScrollBar sets one in its constructor) attached to a
+`B_BITMAP_ACCEPTS_VIEWS` bitmap registers the bitmap's offscreen window as an
+event target, and `~ServerWindow` never removes it (only
+`Desktop::RemoveWindow` does, which offscreen windows skip). The next input
+event dereferences the freed target. Fix: patch 0018. Until it's installed,
+don't put scroll bars in offscreen bitmaps. Recovery: `kill -9` the app_server
+team; launch_daemon restarts it (`shutdown` hangs while it sits in the
+debugger).
+
 **TCP panic on an sshd socket close (seen twice, 8 vCPUs).** `PANIC: bound endpoint
 0x… not in hash!` in `EndpointManager::Unbind(TCPEndpoint*)` ← `~TCPEndpoint` ←
 `tcp_uninit_protocol` ← `socket_free` ← `close_fd_index`, from sshd's listener
