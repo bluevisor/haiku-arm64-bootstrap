@@ -1,0 +1,1097 @@
+From def86dc9b2f4472ece0edf293480c85718870988 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Mon, 26 Oct 2026 23:31:49 -0700
+Subject: [PATCH] Tracker: Quick Look on the space bar
+
+Space previews the selected entry in a floating window, like Quick Look
+in the macOS Finder: images scaled to fit, text files in a scrollable
+monospace view, anything else as a large icon with name, kind, size and
+modification date. The window avoids focus, so arrow keys keep moving
+the selection and the preview follows; space or Escape close it. It
+zooms out of the selected icon on open and back into it on close,
+showing a scaled snapshot of its content during the animation.
+
+Space still extends type-ahead while a name is being typed. Not used in
+file panels.
+---
+ src/kits/tracker/PoseView.cpp        | 150 ++++++
+ src/kits/tracker/PoseView.h          |  16 +
+ src/kits/tracker/QuickLookWindow.cpp | 737 +++++++++++++++++++++++++++
+ src/kits/tracker/QuickLookWindow.h   |  69 +++
+ 4 files changed, 972 insertions(+)
+ create mode 100644 src/kits/tracker/QuickLookWindow.cpp
+ create mode 100644 src/kits/tracker/QuickLookWindow.h
+
+diff --git a/src/kits/tracker/PoseView.cpp b/src/kits/tracker/PoseView.cpp
+index 3c31cf54..72b7b9e3 100644
+--- a/src/kits/tracker/PoseView.cpp
++++ b/src/kits/tracker/PoseView.cpp
+@@ -34,6 +34,7 @@ All rights reserved.
+ 
+ 
+ #include "PoseView.h"
++#include "QuickLookWindow.h"
+ 
+ #include <algorithm>
+ #include <functional>
+@@ -252,6 +253,7 @@ BPoseView::BPoseView(Model* model, uint32 viewMode)
+ 	fLastFilterStringLength(0),
+ 	fStartFrame(0, 0, 0, 0),
+ 	fLastKeyTime(0),
++	fQuickLookVisible(false),
+ 	fLastDeskbarFrameCheckTime(LONGLONG_MIN),
+ 	fDeskbarFrame(0, 0, -1, -1),
+ 	fTextWidgetToCheck(NULL),
+@@ -910,6 +912,8 @@ BPoseView::StopWatching()
+ void
+ BPoseView::DetachedFromWindow()
+ {
++	CloseQuickLook(false, true);
++
+ 	if (fTitleView && !fTitleView->Window())
+ 		delete fTitleView;
+ 
+@@ -2402,7 +2406,24 @@ BPoseView::MessageReceived(BMessage* message)
+ 			FSClipboardPaste(TargetModel(), kCreateLink);
+ 			break;
+ 
++		case kQuickLookHidden:
++			fQuickLookVisible = false;
++			break;
++
++		case B_KEY_DOWN:
++		{
++			// keys forwarded by the Quick Look window when it had focus
++			const char* bytes;
++			if (message->FindString("bytes", &bytes) == B_OK)
++				KeyDown(bytes, strlen(bytes));
++			break;
++		}
++
+ 		case B_CANCEL:
++			if (IsQuickLookOpen()) {
++				CloseQuickLook();
++				break;
++			}
+ 			if (FSClipboardHasRefs())
+ 				FSClipboardClear();
+ 			if (IsTypeAheadFiltering())
+@@ -6710,6 +6731,15 @@ BPoseView::ShowSelectionWindow()
+ 
+ void
+ BPoseView::KeyDown(const char* bytes, int32 count)
++{
++	_KeyDown(bytes, count);
++	if (bytes[0] != B_SPACE)
++		UpdateQuickLook();
++}
++
++
++void
++BPoseView::_KeyDown(const char* bytes, int32 count)
+ {
+ 	char key = bytes[0];
+ 
+@@ -6894,6 +6924,23 @@ BPoseView::KeyDown(const char* bytes, int32 count)
+ 
+ 		default:
+ 		{
++			if (key == B_SPACE && !IsFilePanel()
++				&& (modifiers() & (B_SHIFT_KEY | B_COMMAND_KEY | B_CONTROL_KEY
++					| B_OPTION_KEY)) == 0) {
++				// Space previews the selection (Quick Look) unless the user
++				// is in the middle of typing a name.
++				bigtime_t doubleClickSpeed;
++				get_click_speed(&doubleClickSpeed);
++				bool typing = IsTypeAheadFiltering()
++					? fFilterStrings.LastItem()->Length() > 0
++					: (sMatchString.Length() > 0
++						&& system_time() - fLastKeyTime < doubleClickSpeed * 2);
++				if (!typing) {
++					ToggleQuickLook();
++					break;
++				}
++			}
++
+ 			// handle typeahead selection / filtering
+ 
+ 			if (ViewMode() == kListMode && TrackerSettings().TypeAheadFiltering()) {
+@@ -6951,6 +6998,104 @@ BPoseView::KeyDown(const char* bytes, int32 count)
+ }
+ 
+ 
++
++bool
++BPoseView::IsQuickLookOpen() const
++{
++	return fQuickLookVisible && fQuickLook.IsValid();
++}
++
++
++/*!	The screen frame of the first selected pose's icon, for the Quick Look
++	zoom; invalid if it is scrolled out of view.
++*/
++BRect
++BPoseView::_QuickLookIconFrame()
++{
++	BPose* pose = fSelectionList->FirstItem();
++	if (pose == NULL || Window() == NULL)
++		return BRect();
++
++	BRect rect;
++	if (ViewMode() == kListMode) {
++		int32 index = CurrentPoseList()->IndexOf(pose);
++		rect = CalcPoseRectList(pose, index, true);
++		rect.right = rect.left + rect.Height();
++	} else {
++		rect = CalcPoseRectIcon(pose);
++		float size = IconSizeInt();
++		float left = rect.left + (rect.Width() - size) / 2;
++		rect.Set(left, rect.top, left + size, rect.top + size);
++	}
++	if (!Bounds().Intersects(rect))
++		return BRect();
++	return ConvertToScreen(rect);
++}
++
++
++void
++BPoseView::ToggleQuickLook()
++{
++	if (IsQuickLookOpen()) {
++		CloseQuickLook();
++		return;
++	}
++
++	BPose* pose = fSelectionList->FirstItem();
++	if (pose == NULL)
++		return;
++
++	if (!fQuickLook.IsValid()) {
++		QuickLookWindow* window = new QuickLookWindow(Window()->Frame(),
++			BMessenger(this));
++		fQuickLook = BMessenger(window);
++		// start its thread but keep it hidden: it shows itself zooming out
++		// of the icon once the content is ready
++		window->Hide();
++		window->Show();
++	}
++	fQuickLookVisible = true;
++	UpdateQuickLook();
++}
++
++
++void
++BPoseView::CloseQuickLook(bool zoomToIcon, bool quit)
++{
++	if (fQuickLook.IsValid() && (fQuickLookVisible || quit)) {
++		BMessage message(kQuickLookClose);
++		BRect frame = zoomToIcon ? _QuickLookIconFrame() : BRect();
++		if (frame.IsValid())
++			message.AddRect("frame", frame);
++		message.AddBool("quit", quit);
++		fQuickLook.SendMessage(&message);
++	}
++	fQuickLookVisible = false;
++	if (quit)
++		fQuickLook = BMessenger();
++}
++
++
++void
++BPoseView::UpdateQuickLook()
++{
++	if (!IsQuickLookOpen())
++		return;
++
++	BPose* pose = fSelectionList->FirstItem();
++	if (pose == NULL) {
++		CloseQuickLook(false);
++		return;
++	}
++
++	BMessage message(kQuickLookShow);
++	message.AddRef("refs", pose->TargetModel()->EntryRef());
++	BRect frame = _QuickLookIconFrame();
++	if (frame.IsValid())
++		message.AddRect("frame", frame);
++	fQuickLook.SendMessage(&message);
++}
++
+ BPose*
+ BPoseView::FindNextMatch(int32* matchingIndex, bool reverse)
+ {
+@@ -7537,6 +7682,9 @@ BPoseView::SetTextWidgetToCheck(BTextWidget* widget, BTextWidget* old)
+ void
+ BPoseView::MouseUp(BPoint where)
+ {
++	// a click may have changed the selection
++	UpdateQuickLook();
++
+ 	ASSERT(Window() != NULL);
+ 	ASSERT(Window()->CurrentMessage() != NULL);
+ 
+@@ -8517,6 +8665,8 @@ BPoseView::ClearPoses()
+ void
+ BPoseView::SwitchDir(const entry_ref* newDirRef, AttributeStreamNode* node)
+ {
++	CloseQuickLook(false);
++
+ 	ASSERT(TargetModel() != NULL);
+ 	if (*newDirRef == *TargetModel()->EntryRef())
+ 		// no change
+diff --git a/src/kits/tracker/PoseView.h b/src/kits/tracker/PoseView.h
+index 4ae411ae..f52b86a2 100644
+--- a/src/kits/tracker/PoseView.h
++++ b/src/kits/tracker/PoseView.h
+@@ -146,6 +146,18 @@ public:
+ 	virtual void Draw(BRect update_rect);
+ 	virtual void DrawAfterChildren(BRect update_rect);
+ 	virtual void KeyDown(const char*, int32);
++
++	// Quick Look (space bar)
++	void ToggleQuickLook();
++	void CloseQuickLook(bool zoomToIcon = true, bool quit = false);
++	void UpdateQuickLook();
++	bool IsQuickLookOpen() const;
++
++private:
++	void _KeyDown(const char*, int32);
++	BRect _QuickLookIconFrame();
++
++public:
+ 	virtual void MessageReceived(BMessage* message);
+ 	virtual void MakeFocus(bool = true);
+ 	virtual	BSize MinSize();
+@@ -792,6 +804,10 @@ private:
+ 		// used for typeahead - should be replaced by a typeahead state
+ 
+ 	bigtime_t fLastKeyTime;
++
++	BMessenger fQuickLook;
++		// the Quick Look window; kept (hidden) between uses
++	bool fQuickLookVisible;
+ 	bigtime_t fLastDeskbarFrameCheckTime;
+ 	BRect fDeskbarFrame;
+ 
+diff --git a/src/kits/tracker/QuickLookWindow.cpp b/src/kits/tracker/QuickLookWindow.cpp
+new file mode 100644
+index 00000000..735884f7
+--- /dev/null
++++ b/src/kits/tracker/QuickLookWindow.cpp
+@@ -0,0 +1,737 @@
++/*
++ * Copyright 2026, Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "QuickLookWindow.h"
++
++#include <math.h>
++#include <stdio.h>
++#include <string.h>
++#include <time.h>
++
++#include <algorithm>
++#include <cmath>
++
++#include <Bitmap.h>
++#include <Catalog.h>
++#include <Directory.h>
++#include <File.h>
++#include <Locale.h>
++#include <MessageQueue.h>
++#include <MimeType.h>
++#include <NodeInfo.h>
++#include <Screen.h>
++#include <ScrollView.h>
++#include <String.h>
++#include <TextView.h>
++#include <TranslationUtils.h>
++#include <TranslatorFormats.h>
++#include <TranslatorRoster.h>
++
++#include <StringForSize.h>
++
++
++#undef B_TRANSLATION_CONTEXT
++#define B_TRANSLATION_CONTEXT "QuickLookWindow"
++
++
++static const float kInfoWidth = 440;
++static const float kInfoHeight = 180;
++static const float kTextWidth = 640;
++static const float kTextHeight = 480;
++static const off_t kMaxTextBytes = 256 * 1024;
++static const bigtime_t kZoomDuration = 220000;
++static const int32 kZoomFrames = 14;
++static const bigtime_t kMorphDuration = 160000;
++static const int32 kMorphFrames = 10;
++
++
++namespace {
++
++
++class ImageView : public BView {
++public:
++	ImageView(BBitmap* bitmap)
++		:
++		BView(BRect(0, 0, 1, 1), "image", B_FOLLOW_ALL,
++			B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE),
++		fBitmap(bitmap)
++	{
++		SetViewColor(B_TRANSPARENT_COLOR);
++	}
++
++	~ImageView()
++	{
++		delete fBitmap;
++	}
++
++	void Draw(BRect updateRect)
++	{
++		BRect bounds = Bounds();
++		SetHighColor(40, 40, 40);
++		FillRect(bounds);
++
++		BRect source = fBitmap->Bounds();
++		float scale = std::min(bounds.Width() / source.Width(),
++			bounds.Height() / source.Height());
++		if (scale > 1)
++			scale = 1;
++		float width = source.Width() * scale;
++		float height = source.Height() * scale;
++		BRect target(0, 0, width, height);
++		target.OffsetTo((bounds.Width() - width) / 2,
++			(bounds.Height() - height) / 2);
++
++		SetDrawingMode(B_OP_ALPHA);
++		DrawBitmap(fBitmap, source, target, B_FILTER_BITMAP_BILINEAR);
++		SetDrawingMode(B_OP_COPY);
++	}
++
++private:
++	BBitmap*	fBitmap;
++};
++
++
++class InfoView : public BView {
++public:
++	InfoView(const entry_ref& ref)
++		:
++		BView(BRect(0, 0, 1, 1), "info", B_FOLLOW_ALL,
++			B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE),
++		fIcon(BRect(0, 0, 127, 127), B_RGBA32)
++	{
++		SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
++
++		memset(fIcon.Bits(), 0, fIcon.BitsLength());
++		BNodeInfo::GetTrackerIcon(&ref, &fIcon, (icon_size)128);
++
++		fName = ref.name;
++
++		BEntry entry(&ref, true);
++		BNode node(&entry);
++		char type[B_MIME_TYPE_LENGTH] = "";
++		BNodeInfo(&node).GetType(type);
++
++		if (entry.IsDirectory()) {
++			BDirectory directory(&entry);
++			int32 count = directory.CountEntries();
++			fKind = B_TRANSLATE("Folder");
++			fSize.SetToFormat(count == 1 ? B_TRANSLATE("%" B_PRId32 " item")
++				: B_TRANSLATE("%" B_PRId32 " items"), count);
++		} else {
++			BMimeType mime(type);
++			char description[B_MIME_TYPE_LENGTH];
++			if (type[0] != '\0'
++				&& mime.GetShortDescription(description) == B_OK) {
++				fKind = description;
++			} else
++				fKind = type[0] != '\0' ? type : B_TRANSLATE("Document");
++
++			off_t size = 0;
++			entry.GetSize(&size);
++			char sizeString[128];
++			fSize = string_for_size(size, sizeString, sizeof(sizeString));
++		}
++
++		time_t modified;
++		if (entry.GetModificationTime(&modified) == B_OK) {
++			char buffer[128];
++			strftime(buffer, sizeof(buffer), "%c", localtime(&modified));
++			fModified.SetToFormat(B_TRANSLATE("Modified %s"), buffer);
++		}
++	}
++
++	void Draw(BRect updateRect)
++	{
++		SetDrawingMode(B_OP_ALPHA);
++		DrawBitmap(&fIcon, BPoint(24, (Bounds().Height() - 128) / 2));
++		SetDrawingMode(B_OP_COPY);
++
++		float x = 24 + 128 + 24;
++		float y = (Bounds().Height() - 128) / 2 + 28;
++		SetHighUIColor(B_PANEL_TEXT_COLOR);
++
++		BFont font(be_bold_font);
++		font.SetSize(font.Size() * 1.4f);
++		SetFont(&font);
++		BString name(fName);
++		font.TruncateString(&name, B_TRUNCATE_MIDDLE, Bounds().Width() - x - 16);
++		DrawString(name, BPoint(x, y));
++
++		SetFont(be_plain_font);
++		font_height height;
++		be_plain_font->GetHeight(&height);
++		float line = ceilf(height.ascent + height.descent + height.leading) + 4;
++		y += line + 8;
++		DrawString(fKind, BPoint(x, y));
++		y += line;
++		DrawString(fSize, BPoint(x, y));
++		y += line;
++		DrawString(fModified, BPoint(x, y));
++	}
++
++private:
++	BBitmap		fIcon;
++	BString		fName;
++	BString		fKind;
++	BString		fSize;
++	BString		fModified;
++};
++
++
++/*!	Shows a picture of the real content scaled to the window while it zooms,
++	so the content scales instead of reflowing.
++*/
++class SnapshotView : public BView {
++public:
++	SnapshotView(BBitmap* bitmap, BBitmap* previous = NULL)
++		:
++		BView(BRect(0, 0, 1, 1), "snapshot", B_FOLLOW_ALL, B_WILL_DRAW),
++		fBitmap(bitmap),
++		fPrevious(previous),
++		fProgress(previous != NULL ? 0 : 1)
++	{
++		SetViewColor(B_TRANSPARENT_COLOR);
++	}
++
++	~SnapshotView()
++	{
++		delete fBitmap;
++		delete fPrevious;
++	}
++
++	//! Crossfade position from the previous picture (0) to the new one (1).
++	void SetProgress(float progress)
++	{
++		fProgress = progress;
++	}
++
++	void Draw(BRect updateRect)
++	{
++		if (fPrevious == NULL || fProgress >= 1) {
++			DrawBitmap(fBitmap, fBitmap->Bounds(), Bounds(),
++				B_FILTER_BITMAP_BILINEAR);
++			return;
++		}
++
++		DrawBitmap(fPrevious, fPrevious->Bounds(), Bounds(),
++			B_FILTER_BITMAP_BILINEAR);
++		SetDrawingMode(B_OP_ALPHA);
++		SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_OVERLAY);
++		SetHighColor(0, 0, 0, (uint8)(fProgress * 255));
++		DrawBitmap(fBitmap, fBitmap->Bounds(), Bounds(),
++			B_FILTER_BITMAP_BILINEAR);
++		SetDrawingMode(B_OP_COPY);
++	}
++
++private:
++	BBitmap*	fBitmap;
++	BBitmap*	fPrevious;
++	float		fProgress;
++};
++
++
++void
++draw_offscreen(BView* view)
++{
++	BRect bounds = view->Bounds();
++	rgb_color color = view->ViewColor();
++	if (color != B_TRANSPARENT_COLOR) {
++		view->SetHighColor(color);
++		view->FillRect(bounds);
++	}
++	view->PushState();
++	view->Draw(bounds);
++	view->PopState();
++	for (int32 i = 0; BView* child = view->ChildAt(i); i++)
++		draw_offscreen(child);
++	view->PushState();
++	view->DrawAfterChildren(bounds);
++	view->PopState();
++}
++
++
++float
++ease_out(float t)
++{
++	t = 1 - t;
++	return 1 - t * t * t;
++}
++
++
++float
++ease_in(float t)
++{
++	return t * t * t;
++}
++
++
++bool
++looks_like_text(const char* type, BFile& file)
++{
++	if (strncmp(type, "text/", 5) == 0)
++		return true;
++
++	static const char* const kTextTypes[] = {
++		"application/json", "application/xml", "application/x-sh",
++		"application/x-shellscript", "application/javascript",
++		"application/x-perl", "application/x-python", NULL
++	};
++	for (int32 i = 0; kTextTypes[i] != NULL; i++) {
++		if (strcmp(type, kTextTypes[i]) == 0)
++			return true;
++	}
++	if (strncmp(type, "image/", 6) == 0 || strncmp(type, "audio/", 6) == 0
++		|| strncmp(type, "video/", 6) == 0) {
++		return false;
++	}
++
++	// untyped or generic files: text if the start is (almost) free of
++	// control bytes; raw image data or executables are not
++	uint8 buffer[4096];
++	ssize_t bytesRead = file.ReadAt(0, buffer, sizeof(buffer));
++	if (bytesRead <= 0)
++		return false;
++	int32 control = 0;
++	for (ssize_t i = 0; i < bytesRead; i++) {
++		uint8 c = buffer[i];
++		if (c == 0)
++			return false;
++		if (c < 0x20 && c != '\t' && c != '\n' && c != '\r' && c != '\f'
++			&& c != 0x1b) {
++			control++;
++		}
++	}
++	if (control * 100 > bytesRead)
++		return false;
++
++	// and mostly valid UTF-8 (raw pixel data is not)
++	int32 invalid = 0;
++	for (ssize_t i = 0; i < bytesRead;) {
++		uint8 c = buffer[i];
++		int32 length = c < 0x80 ? 1 : (c & 0xe0) == 0xc0 ? 2
++			: (c & 0xf0) == 0xe0 ? 3 : (c & 0xf8) == 0xf0 ? 4 : 0;
++		if (length == 0) {
++			invalid++;
++			i++;
++			continue;
++		}
++		bool valid = true;
++		for (int32 j = 1; j < length; j++) {
++			if (i + j >= bytesRead)
++				break;
++			if ((buffer[i + j] & 0xc0) != 0x80)
++				valid = false;
++		}
++		if (!valid)
++			invalid++;
++		i += valid ? length : 1;
++	}
++	return invalid * 100 <= bytesRead;
++}
++
++
++} // namespace
++
++
++//	#pragma mark - QuickLookWindow
++
++
++QuickLookWindow::QuickLookWindow(BRect screenFrame,
++	const BMessenger& poseView)
++	:
++	BWindow(BRect(0, 0, kInfoWidth, kInfoHeight), B_TRANSLATE("Quick Look"),
++		B_TITLED_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
++		B_AVOID_FOCUS | B_NOT_ZOOMABLE | B_NOT_MINIMIZABLE
++			| B_ASYNCHRONOUS_CONTROLS),
++	fPoseView(poseView),
++	fOpened(false)
++{
++	// the zoom starts from icon size
++	SetSizeLimits(8, 32768, 8, 32768);
++}
++
++
++void
++QuickLookWindow::MessageReceived(BMessage* message)
++{
++	switch (message->what) {
++		case kQuickLookShow:
++		{
++			entry_ref ref;
++			BRect iconFrame;
++			if (message->FindRect("frame", &iconFrame) != B_OK)
++				iconFrame = BRect();
++			if (MessageQueue()->FindMessage(kQuickLookShow, 0) != NULL) {
++				// the selection moved on already (key repeat): skip ahead
++				break;
++			}
++			if (message->FindRef("refs", &ref) == B_OK)
++				_Show(ref, iconFrame);
++			break;
++		}
++
++		case kQuickLookClose:
++		{
++			BRect iconFrame;
++			if (message->FindRect("frame", &iconFrame) != B_OK)
++				iconFrame = fIconFrame;
++			_Close(iconFrame, message->GetBool("quit", false));
++			break;
++		}
++
++		default:
++			BWindow::MessageReceived(message);
++	}
++}
++
++
++void
++QuickLookWindow::_Show(const entry_ref& ref, BRect iconFrame)
++{
++	if (iconFrame.IsValid())
++		fIconFrame = iconFrame;
++	if (ref == fRef && ChildAt(0) != NULL)
++		return;
++	fRef = ref;
++	SetTitle(ref.name);
++
++	BEntry entry(&ref, true);
++	BScreen screen(this);
++	BRect screenFrame = screen.Frame();
++	float maxWidth = floorf(screenFrame.Width() * 0.7f);
++	float maxHeight = floorf(screenFrame.Height() * 0.7f);
++
++	if (!entry.IsDirectory()) {
++		BFile file(&entry, B_READ_ONLY);
++		char type[B_MIME_TYPE_LENGTH] = "";
++		BNodeInfo(&file).GetType(type);
++
++		if (strncmp(type, "text/", 5) != 0) {
++			entry_ref target;
++			entry.GetRef(&target);
++			BBitmap* bitmap = BTranslationUtils::GetBitmap(&target);
++			if (bitmap != NULL) {
++				// Translators that byte-swap their header floats get garbage
++				// bounds from libroot's broken arm64 __swap_float.
++				BRect bounds = bitmap->Bounds();
++				if (!std::isfinite(bounds.Width())
++					|| !std::isfinite(bounds.Height())
++					|| bounds.Width() < 0 || bounds.Height() < 0
++					|| bounds.Width() > 32767 || bounds.Height() > 32767
++					|| bitmap->InitCheck() != B_OK) {
++					delete bitmap;
++					bitmap = NULL;
++				}
++			}
++			if (bitmap != NULL) {
++				BRect bounds = bitmap->Bounds();
++				float scale = std::min(1.0f, std::min(
++					maxWidth / (bounds.Width() + 1),
++					maxHeight / (bounds.Height() + 1)));
++				float width = std::max(240.0f, (bounds.Width() + 1) * scale);
++				float height = std::max(160.0f, (bounds.Height() + 1) * scale);
++				_SetContent(new ImageView(bitmap), width, height);
++				return;
++			}
++		}
++
++		translator_info info;
++		bool isImage = file.InitCheck() == B_OK
++			&& BTranslatorRoster::Default()->Identify(&file, NULL, &info, 0,
++				NULL, B_TRANSLATOR_BITMAP) == B_OK;
++		if (!isImage && file.InitCheck() == B_OK
++			&& looks_like_text(type, file)) {
++			off_t size = 0;
++			file.GetSize(&size);
++			size = std::min(size, kMaxTextBytes);
++			BString text;
++			char* buffer = text.LockBuffer(size + 1);
++			ssize_t bytesRead = file.ReadAt(0, buffer, size);
++			text.UnlockBuffer(bytesRead > 0 ? bytesRead : 0);
++
++			BRect rect(0, 0, kTextWidth, kTextHeight);
++			BTextView* textView = new BTextView(rect, "text",
++				rect.InsetByCopy(6, 6), B_FOLLOW_ALL, B_WILL_DRAW);
++			textView->SetFontAndColor(be_fixed_font);
++			textView->SetText(text);
++			textView->MakeEditable(false);
++			textView->SetWordWrap(true);
++			BScrollView* scrollView = new BScrollView("scroll", textView,
++				B_FOLLOW_ALL, 0, false, true, B_NO_BORDER);
++			_SetContent(scrollView, kTextWidth, kTextHeight);
++			return;
++		}
++	}
++
++	_SetContent(new InfoView(ref), kInfoWidth, kInfoHeight);
++}
++
++
++void
++QuickLookWindow::_SetContent(BView* view, float width, float height)
++{
++	if (!std::isfinite(width) || !std::isfinite(height)) {
++		width = kInfoWidth;
++		height = kInfoHeight;
++	}
++
++	BBitmap* previous = NULL;
++	while (BView* child = ChildAt(0)) {
++		RemoveChild(child);
++		if (fOpened && previous == NULL && !IsHidden())
++			previous = _Snapshot(child);
++		delete child;
++	}
++
++	// always centered on the screen, like Quick Look on macOS
++	BScreen screen(this);
++	BRect screenFrame = screen.Frame();
++	BPoint center(screenFrame.left + screenFrame.Width() / 2,
++		screenFrame.top + screenFrame.Height() / 2);
++	BPoint topLeft(floorf(center.x - width / 2), floorf(center.y - height / 2));
++	topLeft.x = std::max(screenFrame.left + 4,
++		std::min(topLeft.x, screenFrame.right - width - 4));
++	topLeft.y = std::max(screenFrame.top + 24,
++		std::min(topLeft.y, screenFrame.bottom - height - 4));
++	BRect target(topLeft, topLeft + BPoint(width, height));
++
++	view->ResizeTo(width, height);
++
++	if (!fOpened) {
++		// zoom out of the icon, like Quick Look on macOS
++		fOpened = true;
++		BRect from = fIconFrame.IsValid() ? fIconFrame
++			: BRect(target.LeftTop() + BPoint(width / 2 - 16, height / 2 - 16),
++				target.LeftTop() + BPoint(width / 2 + 16, height / 2 + 16));
++		BBitmap* snapshot = _Snapshot(view);
++		if (snapshot != NULL)
++			_Zoom(snapshot, from, target, true);
++	} else if (previous != NULL) {
++		// another file: resize to it while crossfading the content
++		BBitmap* snapshot = _Snapshot(view);
++		if (snapshot != NULL)
++			_Morph(previous, snapshot, Frame(), target);
++		else
++			delete previous;
++	}
++
++	MoveTo(target.LeftTop());
++	ResizeTo(width, height);
++	AddChild(view);
++	if (IsHidden())
++		Show();
++}
++
++
++/*!	The window avoids focus, but if it gets the keyboard anyway (shown again,
++	clicked), it must not swallow the Quick Look keys: space and Escape close
++	it, everything else (arrow keys, type-ahead) goes on to the Tracker
++	window.
++*/
++void
++QuickLookWindow::DispatchMessage(BMessage* message, BHandler* target)
++{
++	if ((message->what == B_KEY_DOWN || message->what == B_UNMAPPED_KEY_DOWN)
++		&& fPoseView.IsValid()) {
++		const char* bytes = NULL;
++		int32 modifiers = 0;
++		message->FindString("bytes", &bytes);
++		message->FindInt32("modifiers", &modifiers);
++		bool plain = (modifiers & (B_SHIFT_KEY | B_COMMAND_KEY | B_CONTROL_KEY
++			| B_OPTION_KEY)) == 0;
++		if (bytes != NULL && plain
++			&& (bytes[0] == B_SPACE || bytes[0] == B_ESCAPE)) {
++			_Close(fIconFrame, false);
++			fPoseView.SendMessage(kQuickLookHidden);
++		} else
++			fPoseView.SendMessage(message);
++		return;
++	}
++	if (message->what == B_KEY_UP || message->what == B_UNMAPPED_KEY_UP)
++		return;
++
++	BWindow::DispatchMessage(message, target);
++}
++
++
++bool
++QuickLookWindow::QuitRequested()
++{
++	// The close button only hides the window, so it can be reused; app_server
++	// has trouble with windows created and destroyed in quick succession.
++	// Quitting the application still quits it.
++	BMessage* current = CurrentMessage();
++	if (current != NULL && current->what == B_QUIT_REQUESTED
++		&& fPoseView.IsValid()) {
++		_Close(fIconFrame, false);
++		fPoseView.SendMessage(kQuickLookHidden);
++		return false;
++	}
++	return true;
++}
++
++
++void
++QuickLookWindow::_Close(BRect iconFrame, bool quit)
++{
++	BView* view = ChildAt(0);
++	if (view != NULL && !IsHidden()) {
++		RemoveChild(view);
++		BBitmap* snapshot = _Snapshot(view);
++		delete view;
++		BRect frame = Frame();
++		BRect to = iconFrame.IsValid() ? iconFrame
++			: BRect(frame.LeftTop() + BPoint(frame.Width() / 2 - 16,
++					frame.Height() / 2 - 16),
++				frame.LeftTop() + BPoint(frame.Width() / 2 + 16,
++					frame.Height() / 2 + 16));
++		if (snapshot != NULL)
++			_Zoom(snapshot, frame, to, false);
++	}
++
++	if (quit) {
++		Quit();
++		return;
++	}
++
++	while (BView* child = ChildAt(0)) {
++		RemoveChild(child);
++		delete child;
++	}
++	if (!IsHidden())
++		Hide();
++	fOpened = false;
++	fRef = entry_ref();
++}
++
++
++/*!	Renders \a view (not attached to a window) into a bitmap. */
++BBitmap*
++QuickLookWindow::_Snapshot(BView* view)
++{
++	// Never attach a BScrollBar (or anything else that registers an event
++	// mask) to an offscreen bitmap: app_server adds the bitmap's offscreen
++	// window as an event target and does not remove it when the bitmap goes
++	// away, and its event loop then crashes on the dangling target (white
++	// screen). Text previews are snapshotted through a plain BTextView.
++	BView* source = view;
++	BTextView* standIn = NULL;
++	if (BScrollView* scrollView = dynamic_cast<BScrollView*>(view)) {
++		BTextView* textView = dynamic_cast<BTextView*>(scrollView->Target());
++		if (textView == NULL)
++			return NULL;
++		BRect bounds = view->Bounds();
++		standIn = new BTextView(bounds, "snapshot", bounds.InsetByCopy(6, 6),
++			B_FOLLOW_NONE, B_WILL_DRAW);
++		standIn->SetFontAndColor(be_fixed_font);
++		standIn->SetWordWrap(true);
++		// what fits on screen is plenty
++		standIn->SetText(textView->Text(),
++			std::min(textView->TextLength(), (int32)16384));
++		source = standIn;
++	}
++
++	BBitmap* bitmap = new(std::nothrow) BBitmap(source->Bounds(),
++		B_BITMAP_ACCEPTS_VIEWS, B_RGBA32);
++	if (bitmap == NULL || bitmap->InitCheck() != B_OK) {
++		delete bitmap;
++		delete standIn;
++		return NULL;
++	}
++
++	bitmap->Lock();
++	bitmap->AddChild(source);
++	draw_offscreen(source);
++	source->Sync();
++	bitmap->RemoveChild(source);
++	bitmap->Unlock();
++	delete standIn;
++	return bitmap;
++}
++
++
++/*!	Animates the window frame between \a from and \a to while showing
++	\a snapshot scaled to it. Takes ownership of the snapshot.
++*/
++void
++QuickLookWindow::_Zoom(BBitmap* snapshot, BRect from, BRect to, bool opening)
++{
++	SnapshotView* view = new SnapshotView(snapshot);
++	while (BView* child = ChildAt(0)) {
++		RemoveChild(child);
++		delete child;
++	}
++
++	MoveTo(from.LeftTop());
++	ResizeTo(from.Width(), from.Height());
++	view->ResizeTo(from.Width(), from.Height());
++	AddChild(view);
++	if (IsHidden())
++		Show();
++	UpdateIfNeeded();
++
++	bigtime_t start = system_time();
++	for (int32 frame = 1; frame <= kZoomFrames; frame++) {
++		bigtime_t due = start + kZoomDuration * frame / kZoomFrames;
++		bigtime_t now = system_time();
++		if (due > now)
++			snooze(due - now);
++
++		float t = (float)frame / kZoomFrames;
++		t = opening ? ease_out(t) : ease_in(t);
++		BRect current(
++			from.left + (to.left - from.left) * t,
++			from.top + (to.top - from.top) * t,
++			from.right + (to.right - from.right) * t,
++			from.bottom + (to.bottom - from.bottom) * t);
++		MoveTo(floorf(current.left), floorf(current.top));
++		ResizeTo(floorf(current.Width()), floorf(current.Height()));
++		view->Invalidate();
++		UpdateIfNeeded();
++	}
++
++	RemoveChild(view);
++	delete view;
++}
++
++
++/*!	Animates from one previewed file to the next: the frame moves to the new
++	size while the old picture fades into the new one, both scaled to the
++	window. Takes ownership of both snapshots.
++*/
++void
++QuickLookWindow::_Morph(BBitmap* previous, BBitmap* snapshot, BRect from,
++	BRect to)
++{
++	SnapshotView* view = new SnapshotView(snapshot, previous);
++	view->ResizeTo(from.Width(), from.Height());
++	AddChild(view);
++	UpdateIfNeeded();
++
++	bigtime_t start = system_time();
++	for (int32 frame = 1; frame <= kMorphFrames; frame++) {
++		bigtime_t due = start + kMorphDuration * frame / kMorphFrames;
++		bigtime_t now = system_time();
++		if (due > now)
++			snooze(due - now);
++
++		float linear = (float)frame / kMorphFrames;
++		float t = ease_out(linear);
++		BRect current(
++			from.left + (to.left - from.left) * t,
++			from.top + (to.top - from.top) * t,
++			from.right + (to.right - from.right) * t,
++			from.bottom + (to.bottom - from.bottom) * t);
++		MoveTo(floorf(current.left), floorf(current.top));
++		ResizeTo(floorf(current.Width()), floorf(current.Height()));
++		view->SetProgress(linear);
++		view->Invalidate();
++		UpdateIfNeeded();
++	}
++
++	RemoveChild(view);
++	delete view;
++}
+diff --git a/src/kits/tracker/QuickLookWindow.h b/src/kits/tracker/QuickLookWindow.h
+new file mode 100644
+index 00000000..efcd4091
+--- /dev/null
++++ b/src/kits/tracker/QuickLookWindow.h
+@@ -0,0 +1,69 @@
++/*
++ * Copyright 2026, Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef _QUICK_LOOK_WINDOW_H
++#define _QUICK_LOOK_WINDOW_H
++
++
++#include <Entry.h>
++#include <Messenger.h>
++#include <Rect.h>
++#include <Window.h>
++
++
++class BBitmap;
++
++
++namespace BPrivate {
++
++
++const uint32 kQuickLookShow = 'QLsh';
++	// "refs": the entry to preview, "frame": its icon on screen (the first
++	// show zooms out of it)
++const uint32 kQuickLookClose = 'QLcl';
++	// "frame": where to zoom back into (optional); the window is hidden
++	// and reused, unless "quit" is true
++const uint32 kQuickLookHidden = 'QLhd';
++	// sent to the pose view when the user closed the window itself
++
++
++/*!	A floating preview of the selected entry, toggled with the space bar in
++	a Tracker window, like Quick Look in the macOS Finder. It never takes
++	the keyboard focus, so arrow keys keep moving the selection (and the
++	preview follows), and space or Escape close it again.
++*/
++class QuickLookWindow : public BWindow {
++public:
++								QuickLookWindow(BRect screenFrame,
++									const BMessenger& poseView);
++
++	virtual	void				MessageReceived(BMessage* message);
++	virtual	bool				QuitRequested();
++	virtual	void				DispatchMessage(BMessage* message,
++									BHandler* target);
++
++private:
++			void				_Show(const entry_ref& ref, BRect iconFrame);
++			void				_Close(BRect iconFrame, bool quit);
++			void				_SetContent(BView* view, float width,
++									float height);
++			BBitmap*			_Snapshot(BView* view);
++			void				_Zoom(BBitmap* snapshot, BRect from, BRect to,
++									bool opening);
++			void				_Morph(BBitmap* previous, BBitmap* snapshot,
++									BRect from, BRect to);
++
++			BMessenger			fPoseView;
++			entry_ref			fRef;
++			BRect				fIconFrame;
++			bool				fOpened;
++};
++
++
++} // namespace BPrivate
++
++using namespace BPrivate;
++
++
++#endif	// _QUICK_LOOK_WINDOW_H
+-- 
+2.54.0 (Apple Git-157)
+
