@@ -1,4 +1,4 @@
-From def86dc9b2f4472ece0edf293480c85718870988 Mon Sep 17 00:00:00 2001
+From 7f455a222d1923fca09b2bd6897037f447e65b7b Mon Sep 17 00:00:00 2001
 From: John Zheng <bluevisor@gmail.com>
 Date: Mon, 26 Oct 2026 23:31:49 -0700
 Subject: [PATCH] Tracker: Quick Look on the space bar
@@ -16,9 +16,9 @@ file panels.
 ---
  src/kits/tracker/PoseView.cpp        | 150 ++++++
  src/kits/tracker/PoseView.h          |  16 +
- src/kits/tracker/QuickLookWindow.cpp | 737 +++++++++++++++++++++++++++
- src/kits/tracker/QuickLookWindow.h   |  69 +++
- 4 files changed, 972 insertions(+)
+ src/kits/tracker/QuickLookWindow.cpp | 778 +++++++++++++++++++++++++++
+ src/kits/tracker/QuickLookWindow.h   |  70 +++
+ 4 files changed, 1014 insertions(+)
  create mode 100644 src/kits/tracker/QuickLookWindow.cpp
  create mode 100644 src/kits/tracker/QuickLookWindow.h
 
@@ -276,10 +276,10 @@ index 4ae411ae..f52b86a2 100644
  
 diff --git a/src/kits/tracker/QuickLookWindow.cpp b/src/kits/tracker/QuickLookWindow.cpp
 new file mode 100644
-index 00000000..735884f7
+index 00000000..a7806b08
 --- /dev/null
 +++ b/src/kits/tracker/QuickLookWindow.cpp
-@@ -0,0 +1,737 @@
+@@ -0,0 +1,778 @@
 +/*
 + * Copyright 2026, Haiku, Inc. All rights reserved.
 + * Distributed under the terms of the MIT License.
@@ -646,8 +646,9 @@ index 00000000..735884f7
 +			BRect iconFrame;
 +			if (message->FindRect("frame", &iconFrame) != B_OK)
 +				iconFrame = BRect();
-+			if (MessageQueue()->FindMessage(kQuickLookShow, 0) != NULL) {
-+				// the selection moved on already (key repeat): skip ahead
++			if (_ChangePending()) {
++				// the selection moved on already, or a close is waiting:
++				// skip straight to it
 +				break;
 +			}
 +			if (message->FindRef("refs", &ref) == B_OK)
@@ -760,6 +761,12 @@ index 00000000..735884f7
 +		height = kInfoHeight;
 +	}
 +
++	if (_ChangePending()) {
++		// the selection moved on while this file was loading
++		delete view;
++		return;
++	}
++
 +	BBitmap* previous = NULL;
 +	while (BView* child = ChildAt(0)) {
 +		RemoveChild(child);
@@ -782,6 +789,7 @@ index 00000000..735884f7
 +
 +	view->ResizeTo(width, height);
 +
++	bool completed = true;
 +	if (!fOpened) {
 +		// zoom out of the icon, like Quick Look on macOS
 +		fOpened = true;
@@ -790,18 +798,24 @@ index 00000000..735884f7
 +				target.LeftTop() + BPoint(width / 2 + 16, height / 2 + 16));
 +		BBitmap* snapshot = _Snapshot(view);
 +		if (snapshot != NULL)
-+			_Zoom(snapshot, from, target, true);
++			completed = _Zoom(snapshot, from, target, true);
 +	} else if (previous != NULL) {
 +		// another file: resize to it while crossfading the content
 +		BBitmap* snapshot = _Snapshot(view);
 +		if (snapshot != NULL)
-+			_Morph(previous, snapshot, Frame(), target);
++			completed = _Morph(previous, snapshot, Frame(), target);
 +		else
 +			delete previous;
 +	}
 +
-+	MoveTo(target.LeftTop());
-+	ResizeTo(width, height);
++	if (completed) {
++		MoveTo(target.LeftTop());
++		ResizeTo(width, height);
++	} else {
++		// Interrupted by the next file or a close: stay where the animation
++		// got to, so the next transition starts from here.
++		view->ResizeTo(Bounds().Width(), Bounds().Height());
++	}
 +	AddChild(view);
 +	if (IsHidden())
 +		Show();
@@ -938,7 +952,7 @@ index 00000000..735884f7
 +/*!	Animates the window frame between \a from and \a to while showing
 +	\a snapshot scaled to it. Takes ownership of the snapshot.
 +*/
-+void
++bool
 +QuickLookWindow::_Zoom(BBitmap* snapshot, BRect from, BRect to, bool opening)
 +{
 +	SnapshotView* view = new SnapshotView(snapshot);
@@ -955,8 +969,13 @@ index 00000000..735884f7
 +		Show();
 +	UpdateIfNeeded();
 +
++	bool completed = true;
 +	bigtime_t start = system_time();
 +	for (int32 frame = 1; frame <= kZoomFrames; frame++) {
++		if (opening && _ChangePending()) {
++			completed = false;
++			break;
++		}
 +		bigtime_t due = start + kZoomDuration * frame / kZoomFrames;
 +		bigtime_t now = system_time();
 +		if (due > now)
@@ -977,6 +996,7 @@ index 00000000..735884f7
 +
 +	RemoveChild(view);
 +	delete view;
++	return completed;
 +}
 +
 +
@@ -984,7 +1004,7 @@ index 00000000..735884f7
 +	size while the old picture fades into the new one, both scaled to the
 +	window. Takes ownership of both snapshots.
 +*/
-+void
++bool
 +QuickLookWindow::_Morph(BBitmap* previous, BBitmap* snapshot, BRect from,
 +	BRect to)
 +{
@@ -993,8 +1013,13 @@ index 00000000..735884f7
 +	AddChild(view);
 +	UpdateIfNeeded();
 +
++	bool completed = true;
 +	bigtime_t start = system_time();
 +	for (int32 frame = 1; frame <= kMorphFrames; frame++) {
++		if (_ChangePending()) {
++			completed = false;
++			break;
++		}
 +		bigtime_t due = start + kMorphDuration * frame / kMorphFrames;
 +		bigtime_t now = system_time();
 +		if (due > now)
@@ -1016,13 +1041,29 @@ index 00000000..735884f7
 +
 +	RemoveChild(view);
 +	delete view;
++	return completed;
++}
++
++
++/*!	Whether a newer file or a close is waiting. Messages sent while the
++	window animates are still in its port, so first move them into the
++	queue, in order, as the looper itself would.
++*/
++bool
++QuickLookWindow::_ChangePending()
++{
++	while (BMessage* message = MessageFromPort(0))
++		MessageQueue()->AddMessage(message);
++
++	return MessageQueue()->FindMessage(kQuickLookShow, 0) != NULL
++		|| MessageQueue()->FindMessage(kQuickLookClose, 0) != NULL;
 +}
 diff --git a/src/kits/tracker/QuickLookWindow.h b/src/kits/tracker/QuickLookWindow.h
 new file mode 100644
-index 00000000..efcd4091
+index 00000000..bad15711
 --- /dev/null
 +++ b/src/kits/tracker/QuickLookWindow.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,70 @@
 +/*
 + * Copyright 2026, Haiku, Inc. All rights reserved.
 + * Distributed under the terms of the MIT License.
@@ -1074,10 +1115,11 @@ index 00000000..efcd4091
 +			void				_SetContent(BView* view, float width,
 +									float height);
 +			BBitmap*			_Snapshot(BView* view);
-+			void				_Zoom(BBitmap* snapshot, BRect from, BRect to,
++			bool				_Zoom(BBitmap* snapshot, BRect from, BRect to,
 +									bool opening);
-+			void				_Morph(BBitmap* previous, BBitmap* snapshot,
++			bool				_Morph(BBitmap* previous, BBitmap* snapshot,
 +									BRect from, BRect to);
++			bool				_ChangePending();
 +
 +			BMessenger			fPoseView;
 +			entry_ref			fRef;
