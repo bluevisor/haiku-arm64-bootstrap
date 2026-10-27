@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1280" viewBox="0 0 1280 1280" fill="none">
+<title>Haiku VM Guest Tools — Laptop</title><desc>Editable isometric guest tools icon: a thin silver aluminum laptop with a dark bezel and keyboard, blue guest screen, bidirectional integration arrows, and a golden settings gear. Transparent background.</desc>
+<defs>
+<linearGradient id="red" x1="200" y1="240" x2="870" y2="850" gradientUnits="userSpaceOnUse"><stop stop-color="#f4f4f1"/><stop offset=".4" stop-color="#c8cacc"/><stop offset="1" stop-color="#858b90"/></linearGradient>
+<linearGradient id="caseTop" x1="360" y1="200" x2="900" y2="810" gradientUnits="userSpaceOnUse"><stop stop-color="#ffffff"/><stop offset=".45" stop-color="#e4e5e2"/><stop offset="1" stop-color="#a7abae"/></linearGradient>
+<linearGradient id="caseSide" x1="850" y1="350" x2="1040" y2="750" gradientUnits="userSpaceOnUse"><stop stop-color="#969da2"/><stop offset="1" stop-color="#505c65"/></linearGradient>
+<linearGradient id="gold" x1="360" y1="200" x2="900" y2="810" gradientUnits="userSpaceOnUse"><stop stop-color="#fff79a"/><stop offset=".45" stop-color="#ffe33b"/><stop offset="1" stop-color="#e4aa00"/></linearGradient>
+<linearGradient id="side" x1="850" y1="350" x2="1040" y2="750" gradientUnits="userSpaceOnUse"><stop stop-color="#ffda19"/><stop offset="1" stop-color="#b98400"/></linearGradient>
+<linearGradient id="glass" x1="310" y1="310" x2="740" y2="700" gradientUnits="userSpaceOnUse"><stop stop-color="#66b6d4"/><stop offset=".45" stop-color="#3474a3"/><stop offset="1" stop-color="#163b68"/></linearGradient>
+<linearGradient id="shine" x1="310" y1="330" x2="620" y2="660" gradientUnits="userSpaceOnUse"><stop stop-color="white" stop-opacity=".2"/><stop offset="1" stop-color="white" stop-opacity="0"/></linearGradient>
+<linearGradient id="gear" x1="-90" y1="-110" x2="95" y2="125" gradientUnits="userSpaceOnUse"><stop stop-color="#fff8a7"/><stop offset=".4" stop-color="#ffe440"/><stop offset="1" stop-color="#e9ad00"/></linearGradient>
+<radialGradient id="hub"><stop stop-color="#6bafd0"/><stop offset="1" stop-color="#295c89"/></radialGradient>
+<filter id="blur" x="-.3" y="-.5" width="1.6" height="2"><feGaussianBlur stdDeviation="9"/></filter>
+</defs>
+<path d="M80 831 682 1158 1140 985 884 895Z" fill="#163453" opacity=".35" filter="url(#blur)"/>
+<g stroke-linejoin="round">
+<!-- A consistent isometric projection: width vector (600,300), depth vector (-320,160). -->
+<!-- Lid and base share the exact hinge and width. -->
+<path d="M400 240 422 227 1022 527 1000 540Z" fill="url(#caseTop)" stroke="#35404a" stroke-width="5"/>
+<path d="M1000 540 1022 527 1022 927 1000 940Z" fill="url(#caseSide)" stroke="#35404a" stroke-width="5"/>
+<path d="M400 240 1000 540 1000 940 400 640Z" fill="#343c43" stroke="#26323b" stroke-width="6"/>
+<path d="M405 245 996 541" stroke="#e3e7e9" stroke-width="3"/>
+<!-- Screen artwork is projected in the lid plane. -->
+<g transform="matrix(1 .5 0 1 400 240)">
+<path d="M20 22H580V365H20Z" fill="url(#glass)" stroke="#142a3c" stroke-width="5"/>
+<path d="M22 25H578V83H22Z" fill="url(#shine)"/>
+<path d="M266 20H334V35H266Z" fill="#252e35"/>
+<circle cx="300" cy="27" r="3" fill="#8296a3"/>
+<g transform="translate(67 40) scale(.95 .8)" stroke="#183f62" stroke-width="3" stroke-linejoin="round">
+<path d="M80 95H313V52L410 132 313 212V166H80Z" fill="url(#gold)"/>
+<path d="M420 227H187V184L90 264 187 344V298H420Z" fill="#e9f7ff"/>
+<path d="M85 99H309" stroke="#fff9bd" stroke-width="3"/>
+<path d="M416 231H191" stroke="white" stroke-width="3"/>
+</g>
+</g>
+<!-- Full-width hinge. -->
+<path d="M400 640 1000 940 987 947 387 647Z" fill="#626e77" stroke="#303b44" stroke-width="4"/>
+<!-- Width 600 x 300, identical to lid; depth uses the matching opposing 2:1 axis. -->
+<path d="M387 647 987 947 680 1100 80 800Z" fill="url(#caseTop)" stroke="#38434c" stroke-width="5"/>
+<!-- Keyboard and trackpad lie in exactly the same projected deck plane. -->
+<g transform="matrix(1 .5 -1 .5 387 647)">
+<path d="M48 35H552V203H48Z" fill="#727c84" stroke="#8e979d" stroke-width="2"/>
+<rect x="55" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="93" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="131" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="169" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="207" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="245" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="283" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="321" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="359" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="397" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="435" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="473" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="511" y="42" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="55" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="93" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="131" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="169" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="207" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="245" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="283" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="321" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="359" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="397" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="435" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="473" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="511" y="73" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="55" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="93" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="131" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="169" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="207" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="245" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="283" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="321" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="359" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="397" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="435" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="473" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="511" y="104" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="55" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="93" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="131" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="169" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="207" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="245" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="283" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="321" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="359" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="397" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="435" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="473" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="511" y="135" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="55" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="93" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="131" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="169" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="207" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="245" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="283" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="321" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="359" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="397" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="435" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="473" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/><rect x="511" y="166" width="31" height="23" rx="2" fill="#39444d" stroke="#a0a8ad" stroke-width="1.5"/>
+<path d="M209 224H391V294H209Z" fill="#b5bdc3" stroke="#8b959e" stroke-width="2.5"/>
+<path d="M212 292H389" stroke="#f3f5f6" stroke-width="2"/>
+</g>
+<!-- Uniform chassis thickness with equal parallel edges. -->
+<path d="M80 800 680 1100 680 1118 80 818Z" fill="#a3abb1" stroke="#38434c" stroke-width="4"/>
+<path d="M680 1100 987 947 987 965 680 1118Z" fill="url(#caseSide)" stroke="#38434c" stroke-width="4"/>
+<path d="M85 801 680 1098 982 948" stroke="#f6f7f8" stroke-width="3"/>
+<path d="M354 947 406 973" stroke="#76818a" stroke-width="4" stroke-linecap="round"/>
+<!-- Gear is extruded toward the upper right, echoing the monitor viewpoint. -->
+<g transform="matrix(.85 .425 0 .85 952 962)">
+<!-- Side walls: each edge of the gear swept back along the extrusion. -->
+<path d="M0.00 114.00 -17.88 135.83 12.12 105.83 30.00 84.00Z" fill="#b78704" stroke="#986c03" stroke-width="3"/>
+<path d="M-132.33 -35.46 -105.32 -43.63 -75.32 -73.63 -102.33 -65.46Z" fill="#f7cf18" stroke="#986c03" stroke-width="3"/>
+<path d="M57.00 98.73 52.43 126.57 82.43 96.57 87.00 68.73Z" fill="#c59709" stroke="#986c03" stroke-width="3"/>
+<path d="M-96.87 -96.87 -69.40 -90.44 -39.40 -120.44 -66.87 -126.87Z" fill="#f3cb17" stroke="#986c03" stroke-width="3"/>
+<path d="M108.69 83.40 96.87 96.87 126.87 66.87 138.69 53.40Z" fill="#b68604" stroke="#986c03" stroke-width="3"/>
+<path d="M-69.40 -90.44 -57.00 -98.73 -27.00 -128.73 -39.40 -120.44Z" fill="#f5cd17" stroke="#986c03" stroke-width="3"/>
+<path d="M98.73 57.00 108.69 83.40 138.69 53.40 128.73 27.00Z" fill="#d8ac0e" stroke="#986c03" stroke-width="3"/>
+<path d="M105.32 43.63 98.73 57.00 128.73 27.00 135.32 13.63Z" fill="#bc8d06" stroke="#986c03" stroke-width="3"/>
+<path d="M-52.43 -126.57 -35.46 -132.33 -5.46 -162.33 -22.43 -156.57Z" fill="#f7cf18" stroke="#986c03" stroke-width="3"/>
+<path d="M-35.46 -132.33 -14.88 -113.02 15.12 -143.02 -5.46 -162.33Z" fill="#e7bd13" stroke="#986c03" stroke-width="3"/>
+<path d="M-14.88 -113.02 0.00 -114.00 30.00 -144.00 15.12 -143.02Z" fill="#f7cf18" stroke="#986c03" stroke-width="3"/>
+<path d="M135.83 17.88 132.33 35.46 162.33 5.46 165.83 -12.12Z" fill="#c49608" stroke="#986c03" stroke-width="3"/>
+<path d="M114.00 0.00 135.83 17.88 165.83 -12.12 144.00 -30.00Z" fill="#e9bf13" stroke="#986c03" stroke-width="3"/>
+<path d="M113.02 -14.88 114.00 0.00 144.00 -30.00 143.02 -44.88Z" fill="#cda00b" stroke="#986c03" stroke-width="3"/>
+<path d="M132.33 -35.46 113.02 -14.88 143.02 -44.88 162.33 -65.46Z" fill="#b58504" stroke="#986c03" stroke-width="3"/>
+<path d="M43.63 -105.32 57.00 -98.73 87.00 -128.73 73.63 -135.32Z" fill="#efc615" stroke="#986c03" stroke-width="3"/>
+<path d="M90.44 -69.40 98.73 -57.00 128.73 -87.00 120.44 -99.40Z" fill="#e0b511" stroke="#986c03" stroke-width="3"/>
+<path d="M35.46 -132.33 43.63 -105.32 73.63 -135.32 65.46 -162.33Z" fill="#d5a90e" stroke="#986c03" stroke-width="3"/>
+<path d="M17.88 -135.83 35.46 -132.33 65.46 -162.33 47.88 -165.83Z" fill="#f4cc17" stroke="#986c03" stroke-width="3"/>
+<path d="M98.73 -57.00 126.57 -52.43 156.57 -82.43 128.73 -87.00Z" fill="#f4cc17" stroke="#986c03" stroke-width="3"/>
+<path d="M126.57 -52.43 132.33 -35.46 162.33 -65.46 156.57 -82.43Z" fill="#d6aa0e" stroke="#986c03" stroke-width="3"/>
+<path d="M57.00 -98.73 83.40 -108.69 113.40 -138.69 87.00 -128.73Z" fill="#f7cf18" stroke="#986c03" stroke-width="3"/>
+<path d="M96.87 -96.87 90.44 -69.40 120.44 -99.40 126.87 -126.87Z" fill="#c39508" stroke="#986c03" stroke-width="3"/>
+<path d="M83.40 -108.69 96.87 -96.87 126.87 -126.87 113.40 -138.69Z" fill="#e8be13" stroke="#986c03" stroke-width="3"/>
+<polygon points="0.00,-114.00 17.88,-135.83 35.46,-132.33 43.63,-105.32 57.00,-98.73 83.40,-108.69 96.87,-96.87 90.44,-69.40 98.73,-57.00 126.57,-52.43 132.33,-35.46 113.02,-14.88 114.00,0.00 135.83,17.88 132.33,35.46 105.32,43.63 98.73,57.00 108.69,83.40 96.87,96.87 69.40,90.44 57.00,98.73 52.43,126.57 35.46,132.33 14.88,113.02 0.00,114.00 -17.88,135.83 -35.46,132.33 -43.63,105.32 -57.00,98.73 -83.40,108.69 -96.87,96.87 -90.44,69.40 -98.73,57.00 -126.57,52.43 -132.33,35.46 -113.02,14.88 -114.00,0.00 -135.83,-17.88 -132.33,-35.46 -105.32,-43.63 -98.73,-57.00 -108.69,-83.40 -96.87,-96.87 -69.40,-90.44 -57.00,-98.73 -52.43,-126.57 -35.46,-132.33 -14.88,-113.02" fill="url(#gear)" stroke="#a47604" stroke-width="5"/>
+<polygon points="0.00,-114.00 17.88,-135.83 35.46,-132.33 43.63,-105.32 57.00,-98.73 83.40,-108.69 96.87,-96.87 90.44,-69.40 98.73,-57.00 126.57,-52.43 132.33,-35.46 113.02,-14.88 114.00,0.00 135.83,17.88 132.33,35.46 105.32,43.63 98.73,57.00 108.69,83.40 96.87,96.87 69.40,90.44 57.00,98.73 52.43,126.57 35.46,132.33 14.88,113.02 0.00,114.00 -17.88,135.83 -35.46,132.33 -43.63,105.32 -57.00,98.73 -83.40,108.69 -96.87,96.87 -90.44,69.40 -98.73,57.00 -126.57,52.43 -132.33,35.46 -113.02,14.88 -114.00,0.00 -135.83,-17.88 -132.33,-35.46 -105.32,-43.63 -98.73,-57.00 -108.69,-83.40 -96.87,-96.87 -69.40,-90.44 -57.00,-98.73 -52.43,-126.57 -35.46,-132.33 -14.88,-113.02" fill="none" stroke="#fff4a2" stroke-width="2" transform="scale(.975)"/>
+<circle r="64" fill="#b97c00" stroke="#a47506" stroke-width="4"/>
+<circle r="53" fill="url(#hub)" stroke="#244563" stroke-width="4"/>
+<path d="M-39-26A47 47 0 0 1 29-37" stroke="#c4e4f5" stroke-width="4" stroke-linecap="round"/>
+<circle r="20" fill="#ffe65b" stroke="#37536b" stroke-width="4"/>
+</g>
+</g>
+</svg>
