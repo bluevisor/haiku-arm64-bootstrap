@@ -120,6 +120,16 @@ TCP add-on's bind/unbind (code the local patches don't touch). If you see
 `Host is down` with UTM still `started`, read the serial console: `co` at the
 `kdebug>` prompt continues, and the system keeps running.
 
+**`B_HOST_TO_BENDIAN_FLOAT` returns garbage on arm64.** libroot's
+`__swap_float`/`__swap_double` (`src/system/libroot/os/arch/arm64/byteorder.S`)
+have both `fmov` operands reversed: the argument register is overwritten
+before the `rev`, and the result is left in `w0`/`x0` instead of `s0`/`d0`.
+Swapping `1.5f` returned `0x00000001`. Symptoms: PPMTranslator fails with
+"Invalid Argument" (the bitmap header's float bounds are garbage) and the JPEG
+translator writes 1x1 images. Fix: patch 0014. On the installed system, the
+stock `libroot.so` was patched in place (swap instruction words 0 and 2 at
+each function) and repacked as haiku rev 5.
+
 **A TCP connection that both sides closed doesn't read as end-of-file.** Two
 bugs in `TCPEndpoint.cpp`, found through Node's http2 tests (~130 hung until
 the 360 s timeout):

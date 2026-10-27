@@ -1,0 +1,34 @@
+From: John Zheng <bluevisor@gmail.com>
+Subject: [PATCH] libroot/arm64: fix __swap_float and __swap_double
+
+The fmov operands were reversed: the first fmov overwrote the argument
+register with whatever was in w0/x0, and the result was left in w0/x0
+instead of s0/d0. Both functions returned garbage, so every
+B_BENDIAN_TO_HOST_FLOAT/B_HOST_TO_BENDIAN_FLOAT on arm64 was wrong (the JPEG
+translator read a bitmap's bounds as 0 and encoded 1x1 images).
+
+---
+--- a/src/system/libroot/os/arch/arm64/byteorder.S
++++ b/src/system/libroot/os/arch/arm64/byteorder.S
+@@ -10,17 +10,17 @@
+ 
+ /* float __swap_float(float value) */
+ FUNCTION(__swap_float):
+-		fmov s0, w0	// Bitcopy float to general register
++		fmov w0, s0	// Bitcopy float to general register
+ 		rev w0, w0	// GCC8.3 does this for __builtin_bswap32
+-		fmov w0, s0	// and back
++		fmov s0, w0	// and back
+ 		ret
+ FUNCTION_END(__swap_float)
+ 
+ 
+ /* double __swap_double(double value) */
+ FUNCTION(__swap_double):
+-		fmov d0, x0	// Bitcopy double to general register
++		fmov x0, d0	// Bitcopy double to general register
+ 		rev x0, x0	// GCC8.3 does this for __builtin_bswap64
+-		fmov x0, d0	// and back
++		fmov d0, x0	// and back
+ 		ret
+ FUNCTION_END(__swap_double)
