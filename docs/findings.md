@@ -376,6 +376,14 @@ arm64-specific.
 aren't actually UTF-8. That accounts for every block of exactly 952 failures in
 Perl's locale-dependent tests (`t/loc_tools.pl`).
 
+**PNGs that Haiku won't open.** If libpng says "bad adaptive filter value" for
+a PNG whose chunks and CRCs are fine, check the inflated IDAT size against
+IHDR. Some screenshot tools write raw 4-byte pixels (xRGB) without per-row
+filter bytes under a plain 8-bit RGB header (for example 1680×1050 → 7,056,000
+bytes instead of 5,293,050). macOS opens these but renders them sheared.
+Patch 0016 makes PNGTranslator fall back to a decoder that works out the real
+layout from the data size.
+
 **No zoneinfo** on the minimal image: `pip install tzdata` makes Python's
 `zoneinfo` work.
 
