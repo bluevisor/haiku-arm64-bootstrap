@@ -1,0 +1,30 @@
+From 5ffc33110e56e09e2f9bf1b0a8278f701b8fde34 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Sat, 24 Oct 2026 15:47:40 -0700
+Subject: [PATCH 12/18] terminal-shift-tab.patch
+
+---
+ src/apps/terminal/TermViewStates.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/apps/terminal/TermViewStates.cpp b/src/apps/terminal/TermViewStates.cpp
+index 10c7771c..ad08240a 100644
+--- a/src/apps/terminal/TermViewStates.cpp
++++ b/src/apps/terminal/TermViewStates.cpp
+@@ -311,6 +311,13 @@ TermView::DefaultState::KeyDown(const char* bytes, int32 numBytes)
+ 		prefix = "\033O"; // SS3, 7-bit encoding.
+ 
+ 	switch (*bytes) {
++		case B_TAB:
++			// xterm sends back-tab (CSI Z) for Shift+Tab; without it the app
++			// gets a plain Tab and cannot tell the two apart.
++			if ((mod & B_SHIFT_KEY) != 0)
++				toWrite = "\033[Z";
++			break;
++
+ 		case B_RETURN:
+ 			if (rawChar == B_RETURN)
+ 				toWrite = fView->TextBuffer()->IsMode(MODE_LINEFEED_NEWLINE) ? "\r\n" : "\r";
+-- 
+2.39.5
+

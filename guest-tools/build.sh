@@ -9,16 +9,18 @@
 #   ~/config/non-packaged/add-ons/kernel/drivers/bin/virtio_console_attach
 #     (+ dev/misc symlink)
 #   ~/config/non-packaged/add-ons/kernel/drivers/graphics/virtio_gpu
-#     (local patches 0009 + 0015)
+#     (local patches 0009 + 0015), only when the system's virtio_gpu lacks
+#     them; the system packages from build-haiku-system.sh carry them
 #   ~/config/non-packaged/bin/vdagent (+ UserBootscript line)
 # Kernel drivers take effect after a reboot.
 set -euo pipefail
 
 HOST=${1:-haiku-dbg}
-HREV=${HREV:-hrev60295}
+HREV=${HREV:-hrev60368}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(dirname "$HERE")
-WORK=${WORK:-$HOME/Developer/bluevisor/haiku-src}
+# one sparse checkout per hrev: the headers must match the VM's kernel
+WORK=${WORK:-$HOME/Developer/bluevisor/haiku-src-$HREV}
 
 # 1. Haiku sources: headers + virtio_gpu, with our patches on top.
 if [ ! -d "$WORK/.git" ]; then
@@ -57,7 +59,14 @@ K=./kbuild.sh
 mkdir -p out
 $K out/virtio_console virtio_console/virtio_console.cpp
 $K out/virtio_console_attach virtio_console/virtio_console_attach.cpp
-$K out/virtio_gpu virtio_gpu/virtio_gpu.cpp -Ivirtio_gpu
+# The 3D driver goes in non-packaged only if the system one isn't ours
+# (ours publishes the render node, drivers/graphics/virtio_gpu/render_v1)
+if grep -q render_v1 /boot/system/add-ons/kernel/drivers/graphics/virtio_gpu 2>/dev/null; then
+	GPU=
+else
+	GPU=1
+	$K out/virtio_gpu virtio_gpu/virtio_gpu.cpp -Ivirtio_gpu
+fi
 g++ -O2 -Wall -o out/vdagent vdagent/vdagent.cpp -lbe -ltranslation
 # Tracker/Deskbar icon (vdagent/vdagent-icon.hvif, made from vdagent-icon.svg
 # with hvif-tools' icon2icon) and the app signature, as resources.
@@ -71,7 +80,7 @@ install_file out/virtio_console $SYS/ports/virtio_console
 install_file out/virtio_console_attach $USR/bin/virtio_console_attach
 mkdir -p $USR/dev/misc
 ln -sf ../../bin/virtio_console_attach $USR/dev/misc/virtio_console_attach
-install_file out/virtio_gpu $USR/graphics/virtio_gpu
+[ -z "$GPU" ] || install_file out/virtio_gpu $USR/graphics/virtio_gpu
 install_file out/vdagent ~/config/non-packaged/bin/vdagent
 mimeset -f ~/config/non-packaged/bin/vdagent
 

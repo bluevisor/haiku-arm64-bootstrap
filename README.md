@@ -36,6 +36,9 @@ take it from there to:
 
 Built against **hrev60290** (2026-10-21). Binaries are in the
 [release](../../releases); this repo holds everything needed to rebuild them.
+The VM itself now runs **hrev60368** (2026-11-05): the stock nightly's system
+packages plus all local patches (`patches/haiku-hrev60368`) and the *regular*
+profile's apps, built in one pass by `build-haiku-system.sh`.
 
 > Tested on one machine (UTM 5.0.8, macOS 26, Apple Silicon). Expect to adapt
 > paths and versions. Haiku arm64 itself is experimental.
@@ -96,8 +99,10 @@ docker exec haiku-bfs bash /repo/scripts/container/build-haiku-natscroll.sh # re
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-darkmode.sh  # rev 7 (dark mode switch in Appearance)
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-wheel.sh     # rev 8 (mouse wheel in terminal apps)
 docker exec haiku-bfs bash /repo/scripts/container/build-haiku-backtab.sh   # rev 9 (Shift+Tab in terminal apps)
-# newer hrev: all of the above in one pass, from patches/haiku-hrevN (rev 2 of that hrev)
-docker exec -e HREV_NUM=60295 haiku-bfs bash /build/build-haiku-system.sh # copy patches + script into /build first
+# newer hrev: all of the above in one pass, from patches/haiku-hrevN (rev 2 of that hrev),
+# with the regular profile and the VM's natively built PNG/JPEG/WebP translators
+docker exec -e HREV_NUM=60368 -e NATIVE_TRANSLATORS=/build/hpkg/<a haiku_datatranslators from the VM>.hpkg \
+  haiku-bfs bash /build/build-haiku-system.sh # copy patches + script into /build first
 docker exec haiku-bfs bash /repo/scripts/container/build-core-tools.sh   # diff/patch/tar/gzip/xz/zstd/pkgconf hpkgs
 docker exec haiku-bfs bash /repo/scripts/container/build-dev-tools.sh    # bzip2/zip/unzip/nano/ninja/cmake/libiconv
 docker exec haiku-bfs bash /repo/scripts/container/build-stack.sh        # openssl3/curl/git/openssh/python3.12/...

@@ -110,6 +110,46 @@ QEMU virt's arm64 FADT is hardware-reduced and has neither.
 
 ## Haiku arm64 system
 
+**Moving to a new hrev (hrev60295 → hrev60368).** What broke, in order:
+- *jam stamps the old hrev.* With `-sHAIKU_REVISION=hrevN`, jam still only
+  writes `generated.arm64/build/haiku-revision` when it is missing. A stale
+  one put hrev60295 into the kernel, libroot and every package version
+  (`.PackageInfo` said `r1~beta6_hrev60295-1`). Delete `build/haiku-revision`
+  and `build/last-built-revision` before the build (`build-haiku-system.sh`
+  does).
+- *Stock minimum now ships virtio_gpu.* hrev60368's stock `haiku` package has
+  its own (2D-only) `virtio_gpu`, so "add the regular profile's missing files"
+  silently kept it. The 3D driver must be overwritten like the other patched
+  binaries; the script's `cmp` check catches it.
+- *Upstream virtio_gpu went multi-display.* `virtio_gpu_shared_info` became a
+  per-scanout array, shared with the stock accelerant. An old 3D driver in
+  `~/config/non-packaged` (it overrides the system one) would meet the new
+  accelerant with the old layout. Before rebooting into a new hrev, move every
+  kernel add-on in `~/config/non-packaged/add-ons/kernel` and
+  `/boot/system/non-packaged/add-ons/kernel` aside, then rebuild the guest
+  tools (`guest-tools/build.sh`) against the new headers. Upstream's version
+  also dereferences NULL `displayInfo[]` entries in `free`/error paths and
+  trusts the scanout index from userland; patch 0009 guards both.
+- *Stale media servers launched by signature.* `media_server` starts
+  `media_addon_server` by app signature, and the roster picked old copies in
+  `~/regular-np-backup` and `~/hrev60290-np-backup` (and an extracted package
+  tree under `~/src`). Check with
+  `query -a 'BEOS:APP_SIG=="application/x-vnd.Be.addon-host"'`; anything
+  outside `/boot/system` gets zipped away.
+- *Quick Look didn't build with jam.* Patch 0017 added `QuickLookWindow.cpp`
+  without listing it in `src/kits/tracker/Jamfile` (the native script lists it
+  by hand): `undefined reference to QuickLookWindow::QuickLookWindow`. Fixed in
+  the hrev60368 patch.
+- *Upstream overlap.* hrev60368 has its own fix for the `lock_memory_etc()`
+  "no such range" panic (same math), so 0005 dropped its kernel part. Terminal
+  now reports the wheel to mouse-tracking apps itself, but only with alternate
+  scroll off, which Terminal turns on by default; 0007 is now a reorder that
+  checks mouse tracking first, like xterm.
+- *`shutdown` over ssh hung once.* sshd and the user apps quit but the VM never
+  powered off (Tracker, Deskbar, vdagent and a media_addon_server still running,
+  no alert on screen). A force stop from UTM was safe at that point; the next
+  `shutdown -r` after the install worked. Cause not found.
+
 **White screen that never repaints = app_server's event thread crashed.**
 Check syslog for `entered the debugger: Segment violation` in `BList::ItemAt`
 ← `EventDispatcher::_EventLoop`. Cause: a view with an event mask

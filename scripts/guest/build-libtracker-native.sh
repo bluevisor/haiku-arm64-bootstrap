@@ -6,7 +6,7 @@
 # <haiku-src-root> holds src/kits/tracker and
 # src/add-ons/input_server/filters/shortcut_catcher at the VM's hrev.
 #
-# Installs a copy of Tracker in ~/config/non-packaged/apps/TrackerQuickLook
+# Installs (via install-libtracker.sh) a copy of Tracker in ~/config/non-packaged/apps/TrackerQuickLook
 # with the patched lib/libtracker.so beside it, and a user launch override
 # that starts Tracker from there. Other apps (Deskbar, anything using
 # BFilePanel) keep the system libtracker.
@@ -50,26 +50,5 @@ g++ -shared -o "$OUT/libtracker.so" -Wl,-soname,libtracker.so "$OUT"/obj/*.o \
 # files need the C preprocessor, which plain rc does not run)
 xres -o "$OUT/libtracker.so" /boot/system/lib/libtracker.so
 
-# Install. launch_daemon puts its inherited environment first, so a job "env"
-# cannot override LIBRARY_PATH; but that path starts with %A/lib (the app's
-# own folder). So Tracker runs from a copy of its binary in a folder whose
-# lib/ holds the patched library, and only Tracker sees it.
-APP=$HOME/config/non-packaged/apps/TrackerQuickLook
-mkdir -p "$APP/lib"
-cp /boot/system/Tracker "$APP/Tracker.tmp"
-copyattr /boot/system/Tracker "$APP/Tracker.tmp"
-mv -f "$APP/Tracker.tmp" "$APP/Tracker"
-cp "$OUT/libtracker.so" "$APP/lib/libtracker.so.tmp"
-mv -f "$APP/lib/libtracker.so.tmp" "$APP/lib/libtracker.so"
-
-LAUNCH=$HOME/config/settings/launch
-mkdir -p "$LAUNCH"
-cat > "$LAUNCH/tracker-quicklook" <<EOF
-# Run Tracker with the locally patched libtracker (Quick Look, patch 0017).
-# Delete this file and reboot to go back to the stock Tracker.
-service x-vnd.Be-TRAK {
-	launch $APP/Tracker
-}
-EOF
-rm -f "$LAUNCH/tracker-libtracker"
-echo "installed $APP; restart Tracker (kill its team; launch_daemon relaunches it) to use it"
+# Install (install-libtracker.sh must sit next to this script)
+bash "$(dirname "$0")/install-libtracker.sh" "$OUT/libtracker.so"
