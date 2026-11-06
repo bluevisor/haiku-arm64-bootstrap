@@ -168,9 +168,20 @@ grep -q "^[[:space:]]lib:libpng16" .PackageInfo || \
 	sed -i "s/^\thaiku>=r1~beta1$/&\n\tlib:libpng16\n\tlib:libjpeg\n\tlib:libwebp/" .PackageInfo
 grep -q "lib:libwebp" .PackageInfo
 
-# 7. haiku_devel: stock. It requires haiku==<exact version>, so all three
-# move to -2 together.
+# 7. haiku_devel: stock, which is the minimum profile's, plus link symlinks
+# for the regular profile's libraries (without them `-lmedia`, `-lgame`,
+# `-lmidi` ... fail). jam's own haiku_devel.hpkg can't be built here: it needs
+# the HaikuPorts arm64 build-packages index, which is gone (404).
+# haiku_devel requires haiku==<exact version>, so all three move to -2
+# together.
 unpack /build/hpkg/haiku_devel-$HREV-1-arm64.hpkg $W/haiku_devel
+for f in $W/haiku/lib/lib*.so; do
+	b=${f##*/}
+	case $b in libpackage-add-on-*|libroot-addon-*) continue ;; esac
+	[ -e $W/haiku_devel/develop/lib/$b ] || [ -L $W/haiku_devel/develop/lib/$b ] \
+		|| ln -s ../../lib/$b $W/haiku_devel/develop/lib/$b
+done
+[ -L $W/haiku_devel/develop/lib/libmedia.so ]
 for p in haiku haiku_devel haiku_datatranslators; do
 	cd $W/$p
 	sed -i "s/hrev$N-1/hrev$N-2/g" .PackageInfo

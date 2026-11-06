@@ -512,6 +512,60 @@ denied") until `PermitRootLogin yes`; keys still work.
 - With `-Ddont_use_nlink` (BFS link counts), `installperl` copies `bin/perl` and
   `bin/perlthanks` as 0644, so you get "Permission denied" until chmod 755.
 
+**Codecs (`build-ffmpeg.sh`).** The arm64 image's only media plugins are
+`raw_decoder` and `http_streamer`: MediaPlayer opens nothing compressed.
+- Haiku's ffmpeg plugin builds only with the `ffmpeg` build feature, which
+  turns on when jam's `build/jam/repositories/HaikuPorts/arm64` lists
+  `ffmpeg6` and `ffmpeg6_devel`. Listing ours there and putting the `.hpkg`
+  files in `generated.arm64/download/` is enough; the script undoes the list
+  edit so the system package stays plugin-free (the plugin is its own
+  package, `haiku_ffmpeg_plugin`, installable without a reboot). The jam target
+  is plain `ffmpeg`.
+- The `haiku-tools` sysroot had `libz.so` but no `zlib.h`: FFmpeg's configure
+  says `zlib requested but not found`. Extract the bootstrap `zlib_devel`
+  *and* `zlib` from jam's download dir; `zlib_devel` alone replaces the real
+  `libz.so*` with symlinks into a `lib/` that isn't there (`cannot find -lz`).
+- `haiku_devel` is the minimum profile's: no `develop/lib` link symlinks for
+  libmedia, libgame, libmidi, libmidi2, libmail, libbluetooth, libscreensaver
+  or libalm, so `-lmedia` fails. `build-haiku-system.sh` adds them (installed
+  on the VM as `haiku_devel` hrev60368 rev 3). jam's own `haiku_devel.hpkg`
+  can't be built: it downloads the HaikuPorts arm64 build-packages index,
+  which is gone (404, also why `pkgman refresh` fails for HaikuPorts).
+- Test without UI: a small `BMediaFile`/`BMediaTrack` program that calls
+  `DecodedFormat()` and `ReadFrames()` on every track exercises the same
+  plugin path as MediaPlayer.
+
+**Everyday tools (`build-everyday-tools.sh`)**, what each needed:
+- *A cross-built Haiku binary runs on the arm64 Linux host*, far enough to
+  segfault instead of failing with "exec format error". bc's build runs its own
+  `fbc` to make `libmath.h`; generate the header in a host build and drop the
+  rule's prerequisites in `bc/Makefile` (`make -o libmath.h` doesn't reach the
+  sub-make). bc's `fix-libmath_h` also needs `ed`.
+- *file* compiles `magic.mgc` with a host `file` of the same version (5.43):
+  build one first and put it on PATH.
+- *rsync 3.2.7*: the patchset changes `configure.ac`, and the shipped
+  `aclocal.m4` includes `../m4/*.m4`: `aclocal -I m4 && autoconf -o
+  configure.sh && autoheader`.
+- *tmux 3.1c*: `conflicting types for 'closefrom'`. Haiku has it in libbsd,
+  which configure doesn't link: `LIBS=-lbsd`.
+- *unrar*: `Neither LITTLE_ENDIAN nor BIG_ENDIAN are defined`. `os.hpp` only
+  detects x86; pass `-DLITTLE_ENDIAN`.
+- *tcpdump* finds `../libpcap-*` next to its source and links that statically;
+  `--disable-local-libpcap` (not `--with-system-libpcap`) makes it use the
+  package.
+- *wget*: `autoreconf` needs `autopoint` (gettext).
+- *Packaging*: resolvable names can't contain `-` ("invalid character in
+  resolvable name" for `lib:libevent-2.1`); `hpkg-common.sh` writes
+  `lib:libevent_2.1` like HaikuPorts. A license Haiku doesn't ship ("Vim",
+  "UnRAR") must be in `data/licenses/<exact name>` or `package create` refuses.
+  The writable-file block is `global-writable-files`, with hyphens.
+- *htop* is skipped: upstream has no Haiku backend, only an "unsupported"
+  stub with no process data (`btop` works).
+- SourceForge doesn't answer from the container (TLS connect error); netcat
+  1.10 comes from Debian's `netcat_1.10.orig.tar.bz2`, a repack of `nc110.tgz`.
+- The `haiku-bfs` container's `/repo` is a **copy**, not a mount (only `/work`
+  is mounted): `docker cp` scripts in and patchsets out.
+
 **No unwind tables for C on Haiku arm64.** The native gcc doesn't default to
 `-fasynchronous-unwind-tables` (`gcc -Q --help=common`), unlike x86_64 and
 aarch64-linux. A C library built without it has no FDEs (its `.eh_frame` is
