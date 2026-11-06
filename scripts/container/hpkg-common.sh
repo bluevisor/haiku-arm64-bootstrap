@@ -115,6 +115,7 @@ to_sysroot() {
 # package <root> <name> <version> <summary> <description> <copyright> <licenses...>
 # provides: <name>, cmd: per bin/ entry, lib:/devel: per shared library (at
 # the library's own version, e.g. libpkgconf.so.7.0.0 -> 7.0.0 compat >= 7).
+# Resolvable names can't contain '-': libevent-2.1.so -> lib:libevent_2.1.
 # requires: haiku, plus lib: for every NEEDED library from another package.
 # Optional env: REV (package revision), ARCH (default arm64; "any" for data),
 # EXTRA_PROVIDES (raw provides lines), EXTRA_REQUIRES (more requires
@@ -134,17 +135,18 @@ package() {
 		[ -f "$f" ] && [ ! -L "$f" ] || continue
 		so=$($H-readelf -d "$f" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')
 		lib=${so%%.so*}; libver=${f##*.so.}
-		prov+=$'\n'"	lib:$lib = $libver compat >= ${so##*.so.}"
-		[ -e "$r/develop/lib/$lib.so" ] && prov+=$'\n'"	devel:$lib = $libver compat >= ${so##*.so.}"
+		prov+=$'\n'"	lib:${lib//-/_} = $libver compat >= ${so##*.so.}"
+		[ -e "$r/develop/lib/$lib.so" ] && prov+=$'\n'"	devel:${lib//-/_} = $libver compat >= ${so##*.so.}"
 	done
 	while IFS= read -r -d '' f; do
 		head -c4 "$f" | grep -q '^.ELF' || continue
-		for l in $($H-readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(lib[^.]*\)\.so.*\]/\1/p'); do
+		# the name up to ".so" (libpython3.12.so.1.0 -> libpython3.12)
+		for l in $($H-readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(lib.*\)\.so[.0-9]*\]/\1/p'); do
 			case $l in libroot|libbe|libnetwork|libbnetapi|libbsd|libgnu) continue ;; # haiku
 			esac
 			# this package (anywhere: libperl.so lives in perl5/.../CORE)
 			[ -n "$(find "$r" -name "$l.so*" -print -quit)" ] && continue
-			req+=("lib:$l")
+			req+=("lib:${l//-/_}")
 		done
 	done < <(find "$r" -type f -print0)
 	[ -z "${EXTRA_PROVIDES:-}" ] || prov+=$'\n'"$EXTRA_PROVIDES"

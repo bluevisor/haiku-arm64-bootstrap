@@ -30,6 +30,8 @@ take it from there to:
 | **Shift+Tab in terminal apps** | `haiku` rev 9 | `scripts/container/build-haiku-backtab.sh`: Terminal sends xterm's back-tab (`ESC [ Z`) for Shift+Tab instead of a plain Tab, so TUIs and shells can tell them apart | Haiku Code's Shift+Tab permission cycling works |
 | **pkgman repo** | diffutils 3.12, patch 2.8, tar 1.35, gzip 1.15, xz 5.8.4, zstd 1.5.7, pkgconf 3.0.10 | `build-core-tools.sh` + `make-package-repo.sh`, served at [haiku-arm64-packages](https://github.com/bluevisor/haiku-arm64-packages) | `pkgman add-repo` + `pkgman install`; tar round-trips gzip/xz/zstd |
 | ↳ tier 2 | bzip2 1.0.8, zip 3.0, unzip 6.10c23, nano 9.1, ninja 1.13.2, cmake 4.4.4, libiconv 1.18, make 4.4.1_release | `build-dev-tools.sh`, `build-make.sh` | cmake+ninja+pkg-config build a C++ project; cmake HTTPS downloads; zip keeps BFS attributes; nano edits/saves |
+| ↳ everyday tools | which 2.21, file 5.43, wget 1.24.5, rsync 3.2.7, vim 9.1.1618, tmux 3.1c (+ libevent 2.1.13), jq 1.8.1, bc 1.07.1, netcat 1.10, p7zip 17.05, unrar 6.2.10, tcpdump 4.99.7 (+ libpcap 1.11.0) | `build-everyday-tools.sh` | wget over HTTPS, `rsync -aX` keeps BFS attributes, vim syntax highlighting, detached tmux sessions, 7z/zip round-trips, unrar extracts, tcpdump captures on `loop` and the e1000 |
+| ↳ codecs | ffmpeg6 6.1.6 (+ `_devel`, `_tools`), lame 3.100, dav1d 1.5.4, `haiku_ffmpeg_plugin` (hrev60368) | `build-ffmpeg.sh` (in the hrev's Haiku tree) | MediaPlayer's decode path (`BMediaFile`) plays AAC, MP3, FLAC, Opus, H.264, HEVC, VP9 and AV1; `ffmpeg` encodes MP3 and reads https URLs |
 | ↳ base stack | openssl3 3.5.9 rev 2, ca_root_certificates, nghttp2, curl, git, openssh, sqlite, python3.12 (+bz2/lzma/sqlite3), perl, ncurses6 6.6_release | `build-stack.sh`, `package-perl.sh` | replaces the `non-packaged` installs; pkgman, pip, cargo, git, curl and cmake all verify TLS against the packaged CA store |
 | **Rust** | 1.101.0-nightly, LLVM 23 | own repo: [aarch64-unknown-haiku](https://github.com/bluevisor/aarch64-unknown-haiku) | native `cargo build` with crates.io deps and proc-macros; `cargo install ripgrep` works |
 | **Node.js** | 24.21.0 + npm 11.19.0 | built **natively**, compiles offloaded to the container by `tools/rcc/` ([guide step 14](docs/guide.md#14-nodejs-24)) | `pkgman install nodejs24`; HTTPS `fetch`, JIT, worker threads, `npm install`, node-gyp addons |
@@ -107,8 +109,11 @@ docker exec haiku-bfs bash /repo/scripts/container/build-core-tools.sh   # diff/
 docker exec haiku-bfs bash /repo/scripts/container/build-dev-tools.sh    # bzip2/zip/unzip/nano/ninja/cmake/libiconv
 docker exec haiku-bfs bash /repo/scripts/container/build-stack.sh        # openssl3/curl/git/openssh/python3.12/...
 docker exec haiku-bfs bash /repo/scripts/container/build-make.sh         # make 4.4.1_release (CXX = g++)
+docker exec haiku-bfs bash /repo/scripts/container/build-everyday-tools.sh # which/file/wget/rsync/vim/tmux/jq/bc/nc/7z/unrar/tcpdump
 # perl: scripts/guest/build-perl-native.sh with PKG=1 on the VM, then package-perl.sh
 # node: scripts/guest/build-node-native.sh on the VM with tools/rcc, then package-nodejs.sh
+# codecs, in the container with the VM's Haiku tree (the plugin is built by its jam):
+docker exec -e DEPS=/build/deps -e OUT=/build/out/packages haiku-tools bash /repo/scripts/container/build-ffmpeg.sh
 docker exec haiku-bfs bash /repo/scripts/container/make-package-repo.sh  # pkgman repo index
 ```
 
