@@ -693,3 +693,25 @@ readline). Perl was the main blocker for autotools; it now builds natively.
 
 Vendor CLIs: Homebrew, Claude Code, Codex and the Cursor CLI only ship
 macOS/Linux/Windows builds.
+
+**Coding agents on Haiku arm64** (tested 2026-11-06 on hrev60368, Node 24,
+DeepSeek through its OpenAI-compatible API, one task: write a file, run
+`uname`, answer, then a second interactive turn):
+- *Work, headless and interactive:* Qwen Code 0.26.8
+  (`npm i -g @qwen-code/qwen-code`; `--auth-type openai` with `OPENAI_*`),
+  Pi 0.73.1 (`@mariozechner/pi-coding-agent`; built-in `deepseek` provider),
+  Continue CLI 1.5.47 (`@continuedev/cli`; a `config.yaml` model with
+  `provider: openai` + `apiBase`). All three warn that ripgrep (Pi also: fd)
+  has no haiku/arm64 download and fall back to plain grep.
+- *Starts, untested:* Gemini CLI 0.67.0 (`@google/gemini-cli`) only talks to
+  Google: needs `GEMINI_API_KEY` or a Google sign-in.
+- *No:* Codex (`@openai/codex`): its npm wrapper throws `Unsupported
+  platform: haiku (arm64)`; the Rust source would have to be built.
+  OpenCode (`opencode-ai`) and Crush (`@charmland/crush`): npm `notsup`, they
+  ship native binaries only (Bun / Go). Aider: `pip install aider-chat` stops
+  at the first Rust extension, `maturin failed: aarch64 is not supported on
+  Haiku`, which blocks every pydantic-based Python agent until maturin learns
+  the target.
+- Driving a TUI from tmux: text sent with `send-keys` arrives as a paste, so
+  Continue CLI takes the first Enter as a newline; a second Enter submits.
+  tmux 3.1c has no `new-session -e`; set the environment in the command.
