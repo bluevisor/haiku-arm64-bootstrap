@@ -1,0 +1,65 @@
+From ba97c23dc76bfee3c719bf9b0c54587d716a3e5c Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Sat, 24 Oct 2026 15:46:41 -0700
+Subject: [PATCH 07/18] Terminal: mouse wheel goes to apps that track the mouse
+
+Upstream now reports the wheel as mouse buttons 4 and 5, but only when
+alternate scroll mode (DECSET 1007) is off, and Terminal turns that mode
+on by default. Full-screen apps that turn on mouse tracking (vim, htop,
+tmux, cmux) still got three Up/Down arrow keys per wheel step. Check
+mouse tracking first, like xterm does, and fall back to the arrow keys
+only when the app does not track the mouse.
+---
+ src/apps/terminal/TermView.cpp | 29 ++++++++++++++++-------------
+ 1 file changed, 16 insertions(+), 13 deletions(-)
+
+diff --git a/src/apps/terminal/TermView.cpp b/src/apps/terminal/TermView.cpp
+index a4e94b69..9090b503 100644
+--- a/src/apps/terminal/TermView.cpp
++++ b/src/apps/terminal/TermView.cpp
+@@ -1844,7 +1844,22 @@ TermView::MessageReceived(BMessage *message)
+ 			bool mouseOff = fTextBuffer->IsMouseMode(MOUSE_MODE_OFF);
+ 			locker.Unlock();
+ 
+-			if (alternateScroll && alternateScreenActive
++			if (!mouseOff
++				&& message->FindFloat("be:wheel_delta_y", &deltaY) == B_OK && deltaY != 0) {
++				// The application has requested mouse events, encode wheel
++				// up/down and pass along. This comes first, like in xterm:
++				// full-screen apps that track the mouse (vim, htop, tmux)
++				// want the wheel, not three arrow keys per step.
++				BPoint where;
++				uint32 buttons;
++				GetMouse(&where, &buttons, false);
++				_UpdateModifiers();
++				TermPos clickPos = _ConvertToTerminal(where);
++				_SendMouseEvent(buttons, modifiers(), clickPos.x, clickPos.y, false, false,
++					deltaY > 0 ? MOUSE_WHEEL_DOWN : MOUSE_WHEEL_UP);
++				fMouseButtons = buttons;
++				fLastClickPoint = where;
++			} else if (alternateScroll && alternateScreenActive
+ 				&& message->FindFloat("be:wheel_delta_y", &deltaY) == B_OK && deltaY != 0) {
+ 				// We are in alternative screen mode and have a vertical delta
+ 				// we can work with -- emulate scrolling via terminal escape
+@@ -1873,18 +1888,6 @@ TermView::MessageReceived(BMessage *message)
+ 					toWrite << stepString;
+ 
+ 				_WritePTY(toWrite.String(), toWrite.Length());
+-			} else if (!alternateScroll && !mouseOff
+-				&& message->FindFloat("be:wheel_delta_y", &deltaY) == B_OK && deltaY != 0) {
+-				// The application has requested mouse events, encode wheel up/down and pass along.
+-				BPoint where;
+-				uint32 buttons;
+-				GetMouse(&where, &buttons, false);
+-				_UpdateModifiers();
+-				TermPos clickPos = _ConvertToTerminal(where);
+-				_SendMouseEvent(buttons, modifiers(), clickPos.x, clickPos.y, false, false,
+-					deltaY > 0 ? MOUSE_WHEEL_DOWN : MOUSE_WHEEL_UP);
+-				fMouseButtons = buttons;
+-				fLastClickPoint = where;
+ 			} else {
+ 				// let the BView's implementation handle the standard scrolling
+ 				BView::MessageReceived(message);
+-- 
+2.39.5
+

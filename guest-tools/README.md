@@ -7,7 +7,7 @@ backend, SPICE display), the way spice-vdagent does it for Linux guests.
 |---|---|
 | `virtio_console/virtio_console.cpp` | New kernel driver: virtio-serial (multiport console). Publishes each host port as `/dev/ports/virtio/<name>` and `/dev/ports/virtio/vport<n>`. |
 | `virtio_console/virtio_console_attach.cpp` | Small legacy driver, `/dev/misc/virtio_console_attach`. Opening it attaches virtio_pci to the console PCI function (see "Why the attach driver"). |
-| `../patches/haiku-hrev60295/0015-virtio_gpu-report-host-display-changes.patch` | virtio_gpu: handles the display-change config interrupt and adds `VIRTIO_GPU_3D_WAIT_DISPLAY` on `/dev/misc/virtio_gpu/<n>`. Applies on top of 0009. |
+| `../patches/haiku-hrev60368/0015-virtio_gpu-report-host-display-changes.patch` | virtio_gpu: handles the display-change config interrupt and adds `VIRTIO_GPU_3D_WAIT_DISPLAY` on `/dev/misc/virtio_gpu/<n>`. Applies on top of 0009. |
 | `vdagent/` | `vdagent` daemon: SPICE agent protocol on `com.redhat.spice.0`. Text (UTF-8) and images (PNG ↔ `image/bitmap`) go both ways. It waits on the GPU ioctl and calls `BScreen::SetMode` to follow the window size. |
 
 ## UTM settings
@@ -32,7 +32,7 @@ Install locations:
 
 - `/boot/system/non-packaged/add-ons/kernel/drivers/ports/virtio_console`
 - `~/config/non-packaged/add-ons/kernel/drivers/{bin,dev/misc}/virtio_console_attach`
-- `~/config/non-packaged/add-ons/kernel/drivers/graphics/virtio_gpu`
+- `~/config/non-packaged/add-ons/kernel/drivers/graphics/virtio_gpu`, only when the system driver lacks patches 0009/0015 (the system packages from `build-haiku-system.sh` include them)
 - `~/config/non-packaged/bin/vdagent`, started from `UserBootscript`
 
 Logs go to syslog (`grep vdagent /var/log/syslog`). Run `vdagent -v` for per-message tracing.
