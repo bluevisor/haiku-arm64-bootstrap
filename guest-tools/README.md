@@ -9,6 +9,7 @@ backend, SPICE display), the way spice-vdagent does it for Linux guests.
 | `virtio_console/virtio_console_attach.cpp` | Small legacy driver, `/dev/misc/virtio_console_attach`. Opening it attaches virtio_pci to the console PCI function (see "Why the attach driver"). |
 | `../patches/haiku-hrev60368/0015-virtio_gpu-report-host-display-changes.patch` | virtio_gpu: handles the display-change config interrupt and adds `VIRTIO_GPU_3D_WAIT_DISPLAY` on `/dev/misc/virtio_gpu/<n>`. Applies on top of 0009. |
 | `vdagent/` | `vdagent` daemon: SPICE agent protocol on `com.redhat.spice.0`. Text (UTF-8) and images (PNG ↔ `image/bitmap`) go both ways. It waits on the GPU ioctl and calls `BScreen::SetMode` to follow the window size. |
+| `printerctl/printerctl.cpp` | `printerctl add/remove/default/list`: manages printers without the Printers preferences' dialogs. `scripts/host/find-printers.sh --add` builds it on the VM and uses it to add the printers the Mac finds over Bonjour. |
 
 ## UTM settings
 

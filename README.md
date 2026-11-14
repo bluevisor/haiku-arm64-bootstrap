@@ -40,7 +40,16 @@ Built against **hrev60290** (2026-10-21). Binaries are in the
 [release](../../releases); this repo holds everything needed to rebuild them.
 The VM itself now runs **hrev60368** (2026-11-05): the stock nightly's system
 packages plus all local patches (`patches/haiku-hrev60368`) and the *regular*
-profile's apps, built in one pass by `build-haiku-system.sh`.
+profile's apps, built in one pass by `build-haiku-system.sh`. Revisions 5–9
+of those packages add:
+
+| | Patches | Works |
+|---|---|---|
+| **Amber window tabs** in dark mode | 0019 | the focused window's tab and border are amber with dark text, not the red that read as an error |
+| **Color themes** in Appearance > Colors | 0025 | Light/Dark and six themes (Haiku, Ocean, Forest, Graphite, Sunset, Lavender) as picture buttons; every theme has a light and a dark variant |
+| **Clock from QEMU's PL031 RTC** | 0020 (revision 9) | correct time from boot, offline too; set `~/config/settings/RTC_time_settings` to `gmt` (QEMU's RTC is UTC) |
+| **Printing**: IPP Everywhere (PWG raster) driver, IPP transport over TLS | 0021, `scripts/host/find-printers.sh`, `guest-tools/printerctl` | finds Bonjour printers from the Mac (the VM is behind NAT) and adds them; jobs verified against a CUPS test printer and Validate-Job on real ones |
+| **arm64 debugger**: breakpoints, single step, traps; Debugger app with Capstone disassembly and CLI | 0022–0024 (revision 6),  `build-capstone.sh`, `build-libedit.sh` | a `brk` or illegal instruction in an app raises SIGTRAP/SIGILL instead of panicking the kernel; `Debugger --cli` backtraces with source lines, variables, `save-report` |
 
 > Tested on one machine (UTM 5.0.8, macOS 26, Apple Silicon). Expect to adapt
 > paths and versions. Haiku arm64 itself is experimental.
@@ -66,8 +75,9 @@ profile's apps, built in one pass by `build-haiku-system.sh`.
    symlinks and verifies SHA-256. For the Perl tarball, unpack it **on the
    guest** (`python3 -m tarfile -e perl-*.tar.gz /`): it has both `pod/` and
    `Pod/`, which collide on a case-insensitive macOS filesystem.
-6. **Clock + certificates**: Haiku arm64 can't read QEMU's RTC, so it boots in
-   1970 and every TLS certificate looks "not yet valid". Append
+6. **Clock + certificates**: stock Haiku arm64 can't read QEMU's RTC, so it boots in
+   1970 and every TLS certificate looks "not yet valid" (the hrev60368
+   packages read it, patch 0020; the NTP sync is then optional). Append
    `scripts/guest/UserBootscript.snippet` to `~/config/settings/boot/UserBootscript`
    (NTP sync at boot + start sshd). The CA bundle ships in the TLS tarball
    at `/boot/system/non-packaged/data/ssl/`.

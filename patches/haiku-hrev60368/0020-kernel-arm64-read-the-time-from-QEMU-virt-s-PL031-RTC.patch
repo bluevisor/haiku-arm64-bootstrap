@@ -1,0 +1,205 @@
+From f82ca23f10b4fe23f445c1a19fe3375e52d3e520 Mon Sep 17 00:00:00 2001
+From: bluevisor <bluevisor@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 12:31:02 +0000
+Subject: [PATCH 1/6] kernel/arm64: read the time from QEMU virt's PL031 RTC
+
+arch_rtc_get_hw_time() returned 0, so the clock started at 1970 on every
+boot. QEMU's virt machine has a PL031 right after its PL011 UART; ACPI
+does not describe it, so recognize the machine by the boot UART and check
+the PrimeCell ID registers before using it.
+
+The boot loader passes the UART's virtual address (it maps the UART for
+early output), so look up its physical address in the kernel translation
+map before comparing.
+
+Access the registers with plain ldr/str: the compiler turned the ID
+register loop into a post-indexed load, which faults without an
+instruction syndrome, and QEMU's HVF backend aborts on that.
+---
+ .../arch/arm64/arch_real_time_clock.cpp       | 147 +++++++++++++++++-
+ 1 file changed, 145 insertions(+), 2 deletions(-)
+
+diff --git a/src/system/kernel/arch/arm64/arch_real_time_clock.cpp b/src/system/kernel/arch/arm64/arch_real_time_clock.cpp
+index a0ee7083..cd5f5296 100644
+--- a/src/system/kernel/arch/arm64/arch_real_time_clock.cpp
++++ b/src/system/kernel/arch/arm64/arch_real_time_clock.cpp
+@@ -1,17 +1,153 @@
+ /*
+- * Copyright 2019 Haiku, Inc. All Rights Reserved.
++ * Copyright 2019-2026 Haiku, Inc. All Rights Reserved.
+  * Distributed under the terms of the MIT License.
+  */
+ #include <arch/real_time_clock.h>
+ 
++#include <string.h>
++
++#include <KernelExport.h>
++
++#include <boot/kernel_args.h>
+ #include <real_time_clock.h>
+ #include <real_time_data.h>
+ #include <smp.h>
++#include <vm/vm.h>
++#include <vm/VMAddressSpace.h>
++#include <vm/VMTranslationMap.h>
++
++
++//#define TRACE_RTC
++#ifdef TRACE_RTC
++#	define TRACE(x...) dprintf("arm64 rtc: " x)
++#else
++#	define TRACE(x...)
++#endif
++
++
++// ARM PrimeCell PL031 real time clock: a free running 32 bit seconds
++// counter. QEMU's "virt" machine has one right after the PL011 UART in its
++// fixed memory map. Its ACPI tables do not describe it, so we recognize the
++// machine by the UART the boot loader found, and check the PrimeCell
++// identification registers before trusting the address.
++
++#define PL031_DR		0x000	// data (current time), read only
++#define PL031_LR		0x008	// load (sets the counter)
++#define PL031_CR		0x00c	// control: bit 0 starts the counter
++#define PL031_PERIPH_ID	0xfe0
++#define PL031_CELL_ID	0xff0
++
++static const phys_addr_t kQemuVirtUartBase = 0x09000000;
++static const phys_addr_t kQemuVirtRtcBase = 0x09010000;
++
++static volatile uint8* sPL031 = NULL;
++
++
++// MMIO goes through plain ldr/str in asm. Left to the compiler, the ID
++// register loop became a post-indexed "ldr w1, [x4], #4"; a fault on an
++// access with writeback has no instruction syndrome (ISV=0), and QEMU's HVF
++// backend on macOS aborts with "Assertion failed: (isv)" instead of
++// emulating it.
++static inline uint32
++pl031_read(volatile uint8* base, uint32 offset)
++{
++	uint32 value;
++	asm volatile("ldr %w0, [%1]" : "=r"(value) : "r"(base + offset)
++		: "memory");
++	return value;
++}
++
++
++static inline void
++pl031_write(uint32 offset, uint32 value)
++{
++	asm volatile("str %w0, [%1]" : : "rZ"(value), "r"(sPL031 + offset)
++		: "memory");
++}
++
++
++static bool
++pl031_identify(volatile uint8* base)
++{
++	uint32 periph = 0;
++	uint32 cell = 0;
++	for (int i = 0; i < 4; i++) {
++		periph |= (pl031_read(base, PL031_PERIPH_ID + i * 4) & 0xff) << (i * 8);
++		cell |= (pl031_read(base, PL031_CELL_ID + i * 4) & 0xff) << (i * 8);
++	}
++	TRACE("periph id %#" B_PRIx32 ", cell id %#" B_PRIx32 "\n", periph, cell);
++
++	// part number 0x031, designer ARM (0x41); ignore the revision
++	return (periph & 0x000fffff) == 0x00041031 && cell == 0xb105f00d;
++}
++
++
++static phys_addr_t
++uart_physical_address(const uart_info& uart)
++{
++	// The boot loader maps the UART for early output and hands the kernel
++	// that virtual address in regs.start, not the physical one.
++	addr_t address = (addr_t)uart.regs.start;
++	if (IS_USER_ADDRESS(address))
++		return address;
++
++	VMTranslationMap* map = VMAddressSpace::Kernel()->TranslationMap();
++	phys_addr_t physical = 0;
++	uint32 flags = 0;
++	if (map->QueryInterrupt(ROUNDDOWN(address, B_PAGE_SIZE), &physical,
++			&flags) != B_OK || (flags & PAGE_PRESENT) == 0) {
++		return 0;
++	}
++
++	return physical + address % B_PAGE_SIZE;
++}
++
++
++static void
++pl031_init(kernel_args* args)
++{
++	if (sPL031 != NULL)
++		return;
++
++	const uart_info& uart = args->arch_args.uart;
++	phys_addr_t uartBase = strcmp(uart.kind, "pl011") == 0
++		? uart_physical_address(uart) : 0;
++	if (uartBase != kQemuVirtUartBase) {
++		dprintf("arm64 rtc: not a QEMU virt machine (uart %s at %#"
++			B_PRIx64 "), no PL031\n", uart.kind, (uint64)uartBase);
++		return;
++	}
++
++	void* address = NULL;
++	area_id area = vm_map_physical_memory(VMAddressSpace::KernelID(),
++		"pl031 rtc", &address, B_ANY_KERNEL_ADDRESS, B_PAGE_SIZE,
++		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, kQemuVirtRtcBase, false);
++	if (area < 0) {
++		dprintf("arm64 rtc: could not map the PL031: %s\n", strerror(area));
++		return;
++	}
++
++	volatile uint8* base = (volatile uint8*)address;
++	if (!pl031_identify(base)) {
++		dprintf("arm64 rtc: no PL031 at %#" B_PRIx64 "\n",
++			(uint64)kQemuVirtRtcBase);
++		delete_area(area);
++		return;
++	}
++
++	sPL031 = base;
++	if ((pl031_read(sPL031, PL031_CR) & 1) == 0)
++		pl031_write(PL031_CR, 1);
++
++	dprintf("arm64 rtc: PL031 at %#" B_PRIx64 ", time %" B_PRIu32 "\n",
++		(uint64)kQemuVirtRtcBase, pl031_read(sPL031, PL031_DR));
++}
+ 
+ 
+ status_t
+ arch_rtc_init(kernel_args *args, struct real_time_data *data)
+ {
++	pl031_init(args);
+ 	return B_OK;
+ }
+ 
+@@ -19,13 +155,20 @@ arch_rtc_init(kernel_args *args, struct real_time_data *data)
+ uint64
+ arch_rtc_get_hw_time(void)
+ {
+-	return 0;
++	if (sPL031 == NULL)
++		return 0;
++
++	return pl031_read(sPL031, PL031_DR);
+ }
+ 
+ 
+ void
+ arch_rtc_set_hw_time(uint64 seconds)
+ {
++	if (sPL031 == NULL)
++		return;
++
++	pl031_write(PL031_LR, (uint32)seconds);
+ }
+ 
+ 
+-- 
+2.39.5
+
