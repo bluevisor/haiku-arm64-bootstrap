@@ -143,6 +143,22 @@ struct ConsoleHandle {
 static device_manager_info* sDeviceManager;
 
 
+// The virtio bus calls this to log the host's features. Haiku r1beta6's bus
+// calls it without a NULL check (a NULL callback is a kernel panic there), so
+// always pass it.
+static const char*
+get_feature_name(uint64 feature)
+{
+	switch (feature) {
+		case VIRTIO_CONSOLE_F_SIZE:
+			return "size";
+		case VIRTIO_CONSOLE_F_MULTIPORT:
+			return "multiport";
+	}
+	return NULL;
+}
+
+
 static inline uint8*
 buffer_at(ConsoleDevice* device, int32 index)
 {
@@ -356,7 +372,7 @@ init_hardware(ConsoleDevice* device)
 	sDeviceManager->put_node(parent);
 
 	status_t status = device->virtio->negotiate_features(device->virtioDevice,
-		VIRTIO_CONSOLE_F_MULTIPORT, &device->features, NULL);
+		VIRTIO_CONSOLE_F_MULTIPORT, &device->features, get_feature_name);
 	if (status != B_OK)
 		return status;
 	TRACE("negotiated features %#" B_PRIx64 "\n", device->features);
