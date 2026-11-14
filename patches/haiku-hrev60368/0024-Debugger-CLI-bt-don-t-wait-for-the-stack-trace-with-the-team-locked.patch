@@ -1,0 +1,40 @@
+From c36d2e9254abf34bd95aa9f4d9071e2f3e51cef0 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Fri, 6 Nov 2026 21:47:36 +0000
+Subject: [PATCH 5/6] Debugger: CLI bt: don't wait for the stack trace with the
+ team locked
+
+CliStackTraceCommand::Execute() held the team lock while waiting for MSG_THREAD_STACK_TRACE_CHANGED, but GetStackTraceJob needs that lock to compute the trace (Architecture::CreateStackTrace() locks the team), so a "bt" typed before the trace was ready hung the CLI for good. Drop the lock while waiting, like CliPrintVariableCommand does, and recheck the thread state afterwards.
+---
+ .../cli/commands/CliStackTraceCommand.cpp              | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/apps/debugger/user_interface/cli/commands/CliStackTraceCommand.cpp b/src/apps/debugger/user_interface/cli/commands/CliStackTraceCommand.cpp
+index ea93d349..547f18ba 100644
+--- a/src/apps/debugger/user_interface/cli/commands/CliStackTraceCommand.cpp
++++ b/src/apps/debugger/user_interface/cli/commands/CliStackTraceCommand.cpp
+@@ -43,12 +43,20 @@ CliStackTraceCommand::Execute(int argc, const char* const* argv,
+ 		return;
+ 	}
+ 
+-	// get its stack trace
++	// get its stack trace. The job that computes it locks the team, so don't
++	// hold the lock while waiting for it.
++	BReference<Thread> threadReference(thread);
+ 	StackTrace* stackTrace = thread->GetStackTrace();
+ 	while (stackTrace == NULL) {
++		teamLocker.Unlock();
+ 		context.WaitForEvent(CliContext::MSG_THREAD_STACK_TRACE_CHANGED);
+ 		if (context.IsTerminating())
+ 			return;
++		teamLocker.Lock();
++		if (thread->State() != THREAD_STATE_STOPPED) {
++			printf("Current thread is not stopped. Can't get stack trace.\n");
++			return;
++		}
+ 		stackTrace = thread->GetStackTrace();
+ 	}
+ 	BReference<StackTrace> stackTraceReference(stackTrace);
+-- 
+2.39.5
+

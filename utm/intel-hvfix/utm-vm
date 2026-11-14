@@ -1,0 +1,17 @@
+#!/bin/bash
+# utm-vm start|stop|status NAME -- control a UTM VM by AppleScript.
+# /Applications/UTM.app is the ad-hoc signed hvfix build (~/vm/utm-hvfix), and
+# its utmctl is refused (OSStatus -1743: without UTM's team signature the
+# scripting entitlement doesn't pre-authorize it). osascript works once
+# consent was clicked for the sender; that was done for /bin/bash launched as
+# a LaunchAgent, which is what guirun is. So always go through guirun.
+set -euo pipefail
+verb=$1 name=$2
+case $verb in
+	start) script="tell application \"UTM\" to start virtual machine named \"$name\"" ;;
+	stop) script="tell application \"UTM\" to stop virtual machine named \"$name\" by request" ;;
+	status) script="tell application \"UTM\" to get status of virtual machine named \"$name\"" ;;
+	*) echo "usage: utm-vm start|stop|status NAME" >&2; exit 2 ;;
+esac
+pgrep -x UTM >/dev/null || { "$(dirname "$0")/guirun" "open -a /Applications/UTM.app" </dev/null; sleep 10; }
+GUIRUN_WAIT=${GUIRUN_WAIT:-120} "$(dirname "$0")/guirun" "osascript -e '$script' 2>&1" </dev/null

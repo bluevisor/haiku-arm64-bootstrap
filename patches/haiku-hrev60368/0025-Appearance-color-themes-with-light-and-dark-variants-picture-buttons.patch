@@ -1,0 +1,804 @@
+From 7ac620a1133a4d1566dc7ea0799c86df9b727764 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Fri, 6 Nov 2026 22:08:26 +0000
+Subject: [PATCH 6/6] Appearance: color themes with light and dark variants,
+ picture buttons
+
+Replace the "Dark mode" check box in Colors with two picture buttons, Light and Dark, and add six themes as picture buttons (Haiku, Ocean, Forest, Graphite, Sunset, Lavender). Each theme has a light and a dark variant: a window tab color, an accent (progress bars, selections, check marks, keyboard focus) and a hue mixed into the background colors, on top of the built-in light or dark color set. Haiku is the built-in sets unchanged. The selected theme and variant are recognized from the current colors, so nothing new is stored; custom colors select no theme. Choosing Light or Dark keeps the theme.
+---
+ src/preferences/appearance/ColorThemes.cpp | 179 +++++++++++++++++
+ src/preferences/appearance/ColorThemes.h   |  44 +++++
+ src/preferences/appearance/ColorsView.cpp  | 126 ++++++++++--
+ src/preferences/appearance/ColorsView.h    |  15 +-
+ src/preferences/appearance/Jamfile         |   3 +
+ src/preferences/appearance/ThemeButton.cpp | 214 +++++++++++++++++++++
+ src/preferences/appearance/ThemeButton.h   |  41 ++++
+ 7 files changed, 599 insertions(+), 23 deletions(-)
+ create mode 100644 src/preferences/appearance/ColorThemes.cpp
+ create mode 100644 src/preferences/appearance/ColorThemes.h
+ create mode 100644 src/preferences/appearance/ThemeButton.cpp
+ create mode 100644 src/preferences/appearance/ThemeButton.h
+
+diff --git a/src/preferences/appearance/ColorThemes.cpp b/src/preferences/appearance/ColorThemes.cpp
+new file mode 100644
+index 00000000..f12ed8f6
+--- /dev/null
++++ b/src/preferences/appearance/ColorThemes.cpp
+@@ -0,0 +1,179 @@
++/*
++ * Copyright 2026 Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "ColorThemes.h"
++
++#include <Catalog.h>
++#include <HSL.h>
++#include <InterfaceDefs.h>
++
++#include "Colors.h"
++
++
++#undef B_TRANSLATION_CONTEXT
++#define B_TRANSLATION_CONTEXT "Colors tab"
++
++
++static const ColorTheme kColorThemes[kColorThemeCount] = {
++	{ B_TRANSLATE_MARK("Haiku"), true, {}, {} },
++	{ B_TRANSLATE_MARK("Ocean"), false,
++		{ {84, 148, 226, 255}, {255, 255, 255, 255}, {0, 112, 224, 255},
++			{40, 110, 200, 255}, 0.05f },
++		{ {40, 104, 184, 255}, {255, 255, 255, 255}, {64, 156, 255, 255},
++			{40, 90, 170, 255}, 0.12f } },
++	{ B_TRANSLATE_MARK("Forest"), false,
++		{ {132, 196, 116, 255}, {16, 32, 16, 255}, {46, 150, 72, 255},
++			{70, 150, 70, 255}, 0.05f },
++		{ {58, 128, 72, 255}, {255, 255, 255, 255}, {76, 186, 104, 255},
++			{50, 120, 60, 255}, 0.10f } },
++	{ B_TRANSLATE_MARK("Graphite"), false,
++		{ {196, 198, 204, 255}, {0, 0, 0, 255}, {104, 114, 132, 255},
++			{120, 130, 150, 255}, 0.03f },
++		{ {84, 88, 96, 255}, {255, 255, 255, 255}, {150, 160, 178, 255},
++			{90, 100, 120, 255}, 0.06f } },
++	{ B_TRANSLATE_MARK("Sunset"), false,
++		{ {246, 140, 108, 255}, {32, 16, 8, 255}, {226, 88, 64, 255},
++			{230, 120, 80, 255}, 0.05f },
++		{ {196, 84, 72, 255}, {255, 255, 255, 255}, {250, 120, 92, 255},
++			{170, 70, 60, 255}, 0.10f } },
++	{ B_TRANSLATE_MARK("Lavender"), false,
++		{ {180, 156, 232, 255}, {20, 10, 40, 255}, {128, 92, 220, 255},
++			{140, 110, 220, 255}, 0.05f },
++		{ {112, 84, 184, 255}, {255, 255, 255, 255}, {160, 124, 250, 255},
++			{100, 70, 170, 255}, 0.12f } },
++};
++
++
++static rgb_color
++mix(rgb_color a, rgb_color b, float amount)
++{
++	rgb_color result;
++	result.red = (uint8)(a.red + (b.red - a.red) * amount + 0.5f);
++	result.green = (uint8)(a.green + (b.green - a.green) * amount + 0.5f);
++	result.blue = (uint8)(a.blue + (b.blue - a.blue) * amount + 0.5f);
++	result.alpha = 255;
++	return result;
++}
++
++
++static rgb_color
++get(const BMessage& colors, color_which which)
++{
++	return colors.GetColor(ui_color_name(which), make_color(0, 0, 0));
++}
++
++
++static void
++set(BMessage& colors, color_which which, rgb_color color)
++{
++	colors.SetColor(ui_color_name(which), color);
++}
++
++
++const ColorTheme&
++color_theme_at(int32 index)
++{
++	if (index < 0 || index >= kColorThemeCount)
++		index = 0;
++	return kColorThemes[index];
++}
++
++
++void
++get_theme_colors(BMessage* _colors, int32 index, bool dark)
++{
++	BMessage& colors = *_colors;
++	colors.MakeEmpty();
++	get_system_colors(&colors, dark);
++	set(colors, B_DESKTOP_COLOR, ui_color(B_DESKTOP_COLOR));
++
++	const ColorTheme& theme = color_theme_at(index);
++	if (theme.stock)
++		return;
++
++	const ColorThemeVariant& variant = dark ? theme.dark : theme.light;
++
++	// neutral inactive tabs; the stock dark set's are warm, to go with amber
++	if (dark) {
++		set(colors, B_WINDOW_INACTIVE_TAB_COLOR, make_color(64, 64, 66));
++		set(colors, B_WINDOW_INACTIVE_BORDER_COLOR, make_color(64, 64, 66));
++	}
++
++	// a hint of the theme's hue in the background colors
++	const color_which tinted[] = {
++		B_PANEL_BACKGROUND_COLOR,
++		B_MENU_BACKGROUND_COLOR,
++		B_MENU_SELECTED_BACKGROUND_COLOR,
++		B_CONTROL_BACKGROUND_COLOR,
++		B_CONTROL_BORDER_COLOR,
++		B_DOCUMENT_BACKGROUND_COLOR,
++		B_LIST_BACKGROUND_COLOR,
++		B_SCROLL_BAR_THUMB_COLOR,
++		B_WINDOW_INACTIVE_TAB_COLOR,
++		B_WINDOW_INACTIVE_BORDER_COLOR,
++		B_TOOL_TIP_BACKGROUND_COLOR,
++	};
++	for (size_t i = 0; i < B_COUNT_OF(tinted); i++) {
++		set(colors, tinted[i],
++			mix(get(colors, tinted[i]), variant.tint, variant.tintAmount));
++	}
++
++	set(colors, B_WINDOW_TAB_COLOR, variant.tab);
++	set(colors, B_WINDOW_BORDER_COLOR, variant.tab);
++	set(colors, B_WINDOW_TEXT_COLOR, variant.tabText);
++
++	// the accent: progress bars, selections, check marks, keyboard focus
++	set(colors, B_STATUS_BAR_COLOR, variant.accent);
++	set(colors, B_LIST_SELECTED_BACKGROUND_COLOR,
++		mix(get(colors, B_LIST_SELECTED_BACKGROUND_COLOR), variant.accent, 0.4f));
++	set(colors, B_MENU_SELECTED_BACKGROUND_COLOR,
++		mix(get(colors, B_MENU_SELECTED_BACKGROUND_COLOR), variant.accent, 0.3f));
++	set(colors, B_LINK_TEXT_COLOR, mix(variant.accent,
++		dark ? make_color(255, 255, 255) : make_color(0, 0, 0), 0.15f));
++
++	const hsl_color accent = hsl_color::from_rgb(variant.accent);
++	hsl_color highlight = accent;
++	highlight.saturation = max_c(0.2f, highlight.saturation / 2.f);
++	set(colors, B_CONTROL_HIGHLIGHT_COLOR, highlight.to_rgb());
++
++	hsl_color mark = accent;
++	mark.saturation = max_c(0.2f, mark.saturation * 0.67f);
++	mark.lightness = max_c(0.25f, mark.lightness * 0.55f);
++	if (dark)
++		mark.lightness = min_c(0.75f, accent.lightness * 1.1f);
++	set(colors, B_CONTROL_MARK_COLOR, mark.to_rgb());
++
++	hsl_color navigation = accent;
++	navigation.lightness = dark ? max_c(0.55f, accent.lightness)
++		: min_c(0.45f, accent.lightness);
++	set(colors, B_KEYBOARD_NAVIGATION_COLOR, navigation.to_rgb());
++}
++
++
++int32
++match_color_theme(const BMessage& colors, bool& _dark)
++{
++	const color_which compared[] = {
++		B_WINDOW_TAB_COLOR,
++		B_PANEL_BACKGROUND_COLOR,
++		B_STATUS_BAR_COLOR,
++	};
++
++	for (int32 index = 0; index < kColorThemeCount; index++) {
++		for (int dark = 0; dark < 2; dark++) {
++			BMessage theme;
++			get_theme_colors(&theme, index, dark != 0);
++			bool same = true;
++			for (size_t i = 0; i < B_COUNT_OF(compared) && same; i++)
++				same = get(theme, compared[i]) == get(colors, compared[i]);
++			if (same) {
++				_dark = dark != 0;
++				return index;
++			}
++		}
++	}
++	return -1;
++}
+diff --git a/src/preferences/appearance/ColorThemes.h b/src/preferences/appearance/ColorThemes.h
+new file mode 100644
+index 00000000..1e0ea2ae
+--- /dev/null
++++ b/src/preferences/appearance/ColorThemes.h
+@@ -0,0 +1,44 @@
++/*
++ * Copyright 2026 Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef COLOR_THEMES_H
++#define COLOR_THEMES_H
++
++
++#include <GraphicsDefs.h>
++#include <Message.h>
++
++
++// A theme is a light and a dark variant of a few accent colors (window tab,
++// progress/selection accent and a hue mixed into the background colors) on
++// top of the system's built-in light or dark color set.
++struct ColorThemeVariant {
++	rgb_color	tab;
++	rgb_color	tabText;
++	rgb_color	accent;
++	rgb_color	tint;
++	float		tintAmount;
++};
++
++struct ColorTheme {
++	const char*			name;
++	bool				stock;
++		// the built-in color sets unchanged
++	ColorThemeVariant	light;
++	ColorThemeVariant	dark;
++};
++
++static const int32 kColorThemeCount = 6;
++
++const ColorTheme& color_theme_at(int32 index);
++
++// Fills colors with the full color set of a theme. The desktop color is the
++// current one: it belongs to Backgrounds.
++void get_theme_colors(BMessage* colors, int32 theme, bool dark);
++
++// The theme (and variant) a color set was made from, or -1.
++int32 match_color_theme(const BMessage& colors, bool& dark);
++
++
++#endif	// COLOR_THEMES_H
+diff --git a/src/preferences/appearance/ColorsView.cpp b/src/preferences/appearance/ColorsView.cpp
+index 95efa96e..37b53783 100644
+--- a/src/preferences/appearance/ColorsView.cpp
++++ b/src/preferences/appearance/ColorsView.cpp
+@@ -21,16 +21,20 @@
+ #include <Directory.h>
+ #include <Entry.h>
+ #include <File.h>
++#include <GridView.h>
++#include <GroupView.h>
+ #include <HSL.h>
+ #include <LayoutBuilder.h>
+ #include <Locale.h>
+ #include <Messenger.h>
+ #include <Path.h>
+ #include <SpaceLayoutItem.h>
++#include <StringView.h>
+ 
+ #include "AppearanceWindow.h"
+ #include "Colors.h"
+ #include "ColorsView.h"
++#include "ThemeButton.h"
+ 
+ 
+ #undef B_TRANSLATION_CONTEXT
+@@ -41,7 +45,8 @@
+ #define AUTO_ADJUST_CHANGED 'madj'
+ #define UPDATE_COLOR 'upcl'
+ #define ATTRIBUTE_CHOSEN 'atch'
+-#define DARK_MODE_CHANGED 'drkm'
++#define MODE_CHOSEN 'mdch'
++#define THEME_CHOSEN 'thch'
+ 
+ using BPrivate::BColorItem;
+ using BPrivate::BColorListView;
+@@ -56,10 +61,45 @@ ColorsView::ColorsView(const char* name)
+ 
+ 	LoadSettings();
+ 
+-	// Switches all colors between the built-in light and dark sets
+-	fDarkModeCheckBox = new BCheckBox(B_TRANSLATE("Dark mode"),
+-		new BMessage(DARK_MODE_CHANGED));
+-	_UpdateDarkModeCheckBox();
++	// Light and dark, and the color themes: picture buttons
++	fShownTheme = -2;
++	fShownMode = -1;
++	for (int32 dark = 0; dark < 2; dark++) {
++		BMessage* message = new BMessage(MODE_CHOSEN);
++		message->AddBool("dark", dark != 0);
++		fModeButtons[dark] = new ThemeButton(dark ? "dark" : "light",
++			dark ? B_TRANSLATE("Dark") : B_TRANSLATE("Light"), message);
++	}
++	for (int32 i = 0; i < kColorThemeCount; i++) {
++		for (int32 dark = 0; dark < 2; dark++)
++			get_theme_colors(&fThemeColors[i][dark], i, dark != 0);
++		BMessage* message = new BMessage(THEME_CHOSEN);
++		message->AddInt32("theme", i);
++		const char* name = color_theme_at(i).name;
++		fThemeButtons[i] = new ThemeButton(name, B_TRANSLATE_NOCOLLECT(name),
++			message);
++	}
++
++	BStringView* modeLabel = new BStringView("mode label",
++		B_TRANSLATE("Appearance:"));
++	BStringView* themeLabel = new BStringView("theme label",
++		B_TRANSLATE("Theme:"));
++	const BAlignment topLeft(B_ALIGN_LEFT, B_ALIGN_TOP);
++	modeLabel->SetExplicitAlignment(topLeft);
++	themeLabel->SetExplicitAlignment(topLeft);
++
++	BGroupView* modeRow = new BGroupView(B_HORIZONTAL, B_USE_DEFAULT_SPACING);
++	for (int32 dark = 0; dark < 2; dark++)
++		modeRow->GroupLayout()->AddView(fModeButtons[dark]);
++	modeRow->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
++
++	BGridView* themeGrid = new BGridView(B_USE_DEFAULT_SPACING,
++		B_USE_SMALL_SPACING);
++	for (int32 i = 0; i < kColorThemeCount; i++)
++		themeGrid->GridLayout()->AddView(fThemeButtons[i], i % 3, i / 3);
++	themeGrid->GridLayout()->AddItem(BSpaceLayoutItem::CreateGlue(), 3, 0);
++
++	_UpdateThemeButtons();
+ 
+ 	fAutoSelectCheckBox = new BCheckBox(B_TRANSLATE("Automatically pick secondary colors"),
+ 		new BMessage(AUTO_ADJUST_CHANGED));
+@@ -79,7 +119,12 @@ ColorsView::ColorsView(const char* name)
+ 		"picker", new BMessage(UPDATE_COLOR));
+ 
+ 	BLayoutBuilder::Group<>(this, B_VERTICAL)
+-		.Add(fDarkModeCheckBox)
++		.AddGrid(B_USE_DEFAULT_SPACING, B_USE_DEFAULT_SPACING)
++			.Add(modeLabel, 0, 0)
++			.Add(modeRow, 1, 0)
++			.Add(themeLabel, 0, 1)
++			.Add(themeGrid, 1, 1)
++			.End()
+ 		.Add(fAutoSelectCheckBox)
+ 		.Add(fScrollView, 10.0)
+ 		.AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING)
+@@ -102,7 +147,10 @@ ColorsView::~ColorsView()
+ void
+ ColorsView::AttachedToWindow()
+ {
+-	fDarkModeCheckBox->SetTarget(this);
++	for (int32 dark = 0; dark < 2; dark++)
++		fModeButtons[dark]->SetTarget(this);
++	for (int32 i = 0; i < kColorThemeCount; i++)
++		fThemeButtons[i]->SetTarget(this);
+ 	fAutoSelectCheckBox->SetTarget(this);
+ 	fPicker->SetTarget(this);
+ 	fAttrList->SetTarget(this);
+@@ -177,9 +225,26 @@ ColorsView::MessageReceived(BMessage* message)
+ 			break;
+ 		}
+ 
+-		case DARK_MODE_CHANGED:
+-			_SetDarkMode(fDarkModeCheckBox->Value() == B_CONTROL_ON);
++		case MODE_CHOSEN:
++		{
++			// keep the theme, switch its variant; a custom set goes back to
++			// the Haiku theme
++			bool dark = message->GetBool("dark", false);
++			bool currentDark;
++			int32 theme = match_color_theme(fCurrentColors, currentDark);
++			_ApplyTheme(theme < 0 ? 0 : theme, dark);
++			break;
++		}
++
++		case THEME_CHOSEN:
++		{
++			int32 theme = message->GetInt32("theme", 0);
++			const rgb_color panel = fCurrentColors.GetColor(
++				ui_color_name(B_PANEL_BACKGROUND_COLOR),
++				ui_color(B_PANEL_BACKGROUND_COLOR));
++			_ApplyTheme(theme, panel.IsDark());
+ 			break;
++		}
+ 
+ 		default:
+ 			BView::MessageReceived(message);
+@@ -295,17 +360,15 @@ ColorsView::_SetUIColors(const BMessage& colors)
+ {
+ 	set_ui_colors(&colors);
+ 	fCurrentColors = colors;
+-	_UpdateDarkModeCheckBox();
++	_UpdateThemeButtons();
+ }
+ 
+ 
+ void
+-ColorsView::_SetDarkMode(bool dark)
++ColorsView::_ApplyTheme(int32 theme, bool dark)
+ {
+ 	BMessage colors;
+-	get_system_colors(&colors, dark);
+-	// the desktop color is set in Backgrounds, leave it alone
+-	colors.SetColor(ui_color_name(B_DESKTOP_COLOR), ui_color(B_DESKTOP_COLOR));
++	get_theme_colors(&colors, theme, dark);
+ 
+ 	_SetUIColors(colors);
+ 	_UpdatePreviews(colors);
+@@ -320,11 +383,34 @@ ColorsView::_SetDarkMode(bool dark)
+ 
+ 
+ void
+-ColorsView::_UpdateDarkModeCheckBox()
++ColorsView::_UpdateThemeButtons()
+ {
+-	const rgb_color panel = fCurrentColors.GetColor(
+-		ui_color_name(B_PANEL_BACKGROUND_COLOR), ui_color(B_PANEL_BACKGROUND_COLOR));
+-	fDarkModeCheckBox->SetValue(panel.IsDark() ? B_CONTROL_ON : B_CONTROL_OFF);
++	bool dark;
++	int32 theme = match_color_theme(fCurrentColors, dark);
++	if (theme < 0) {
++		// custom colors: no theme selected, the mode buttons show Haiku
++		const rgb_color panel = fCurrentColors.GetColor(
++			ui_color_name(B_PANEL_BACKGROUND_COLOR),
++			ui_color(B_PANEL_BACKGROUND_COLOR));
++		dark = panel.IsDark();
++	}
++	const int32 mode = dark ? 1 : 0;
++
++	if (theme != fShownTheme) {
++		const int32 previewed = theme < 0 ? 0 : theme;
++		for (int32 i = 0; i < 2; i++)
++			fModeButtons[i]->SetColors(fThemeColors[previewed][i]);
++		for (int32 i = 0; i < kColorThemeCount; i++)
++			fThemeButtons[i]->SetValue(i == theme);
++	}
++	if (theme != fShownTheme || mode != fShownMode) {
++		for (int32 i = 0; i < kColorThemeCount; i++)
++			fThemeButtons[i]->SetColors(fThemeColors[i][mode]);
++		for (int32 i = 0; i < 2; i++)
++			fModeButtons[i]->SetValue(i == mode);
++	}
++	fShownTheme = theme;
++	fShownMode = mode;
+ }
+ 
+ 
+@@ -357,7 +443,7 @@ ColorsView::_SetColor(color_which which, rgb_color color)
+ 	if (!fAutoSelectCheckBox->Value()) {
+ 		if (ui_color(which) != color)
+ 			set_ui_color(which, color);
+-		_UpdateDarkModeCheckBox();
++		_UpdateThemeButtons();
+ 		return;
+ 	}
+ 
+@@ -473,5 +559,5 @@ ColorsView::_SetColor(color_which which, rgb_color color)
+ 		fCurrentColors.SetColor(ui_color_name(B_FAILURE_COLOR), failure.to_rgb());
+ 	}
+ 	set_ui_colors(&fCurrentColors);
+-	_UpdateDarkModeCheckBox();
++	_UpdateThemeButtons();
+ }
+diff --git a/src/preferences/appearance/ColorsView.h b/src/preferences/appearance/ColorsView.h
+index 5f4882fc..3d84496b 100644
+--- a/src/preferences/appearance/ColorsView.h
++++ b/src/preferences/appearance/ColorsView.h
+@@ -31,6 +31,11 @@
+ 
+ #include <DecorInfo.h>
+ 
++#include "ColorThemes.h"
++
++
++class ThemeButton;
++
+ 
+ class ColorsView : public BView {
+ public:
+@@ -56,13 +61,17 @@ private:
+ 			void				_SetColor(color_which which, rgb_color color);
+ 			void				_SetCurrentColor(rgb_color color);
+ 			void				_SetUIColors(const BMessage& colors);
+-			void				_SetDarkMode(bool dark);
+-			void				_UpdateDarkModeCheckBox();
++			void				_ApplyTheme(int32 theme, bool dark);
++			void				_UpdateThemeButtons();
+ 
+ private:
+ 			BColorControl*		fPicker;
+ 
+-			BCheckBox*			fDarkModeCheckBox;
++			ThemeButton*		fModeButtons[2];
++			ThemeButton*		fThemeButtons[kColorThemeCount];
++			BMessage			fThemeColors[kColorThemeCount][2];
++			int32				fShownTheme;
++			int32				fShownMode;
+ 			BCheckBox*			fAutoSelectCheckBox;
+ 			BListView*			fAttrList;
+ 
+diff --git a/src/preferences/appearance/Jamfile b/src/preferences/appearance/Jamfile
+index 99822f39..185ee636 100644
+--- a/src/preferences/appearance/Jamfile
++++ b/src/preferences/appearance/Jamfile
+@@ -10,10 +10,12 @@ Application Appearance :
+ 	AppearanceWindow.cpp
+ 	Colors.cpp
+ 	ColorsView.cpp
++	ColorThemes.cpp
+ 	FakeScrollBar.cpp
+ 	FontSelectionView.cpp
+ 	FontView.cpp
+ 	LookAndFeelSettingsView.cpp
++	ThemeButton.cpp
+ 
+ 	: be [ TargetLibstdc++ ] [ TargetLibsupc++ ] localestub shared
+ 	: Appearance.rdef
+@@ -24,6 +26,7 @@ DoCatalogs Appearance :
+ 	:
+ 	AntialiasingSettingsView.cpp
+ 	ColorsView.cpp
++	ColorThemes.cpp
+ 	AppearanceWindow.cpp
+ 	Colors.cpp
+ 	LookAndFeelSettingsView.cpp
+diff --git a/src/preferences/appearance/ThemeButton.cpp b/src/preferences/appearance/ThemeButton.cpp
+new file mode 100644
+index 00000000..d05c156a
+--- /dev/null
++++ b/src/preferences/appearance/ThemeButton.cpp
+@@ -0,0 +1,214 @@
++/*
++ * Copyright 2026 Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "ThemeButton.h"
++
++#include <GradientLinear.h>
++#include <InterfaceDefs.h>
++#include <LayoutUtils.h>
++#include <Region.h>
++#include <Window.h>
++
++
++static const float kThumbnailWidth = 76;
++static const float kThumbnailHeight = 50;
++static const float kRing = 3;
++static const float kLabelSpacing = 4;
++
++
++ThemeButton::ThemeButton(const char* name, const char* label,
++	BMessage* message)
++	:
++	BControl(name, label, message, B_WILL_DRAW | B_NAVIGABLE)
++{
++	SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
++	SetLowUIColor(B_PANEL_BACKGROUND_COLOR);
++}
++
++
++void
++ThemeButton::SetColors(const BMessage& colors)
++{
++	fColors = colors;
++	Invalidate();
++}
++
++
++rgb_color
++ThemeButton::_Color(color_which which) const
++{
++	return fColors.GetColor(ui_color_name(which), ui_color(which));
++}
++
++
++BRect
++ThemeButton::_ThumbnailFrame() const
++{
++	BRect frame(0, 0, kThumbnailWidth - 1, kThumbnailHeight - 1);
++	frame.OffsetBy(floorf((Bounds().Width() - kThumbnailWidth) / 2), kRing);
++	return frame;
++}
++
++
++void
++ThemeButton::_DrawWindow(BRect frame, bool active)
++{
++	const float tabHeight = 7;
++	BRect tab(frame.left, frame.top, frame.left + floorf(frame.Width() * 0.55f),
++		frame.top + tabHeight - 1);
++	BRect body(frame.left, tab.bottom + 1, frame.right, frame.bottom);
++
++	SetHighColor(_Color(active ? B_WINDOW_TAB_COLOR : B_WINDOW_INACTIVE_TAB_COLOR));
++	FillRect(tab);
++	SetHighColor(_Color(active ? B_WINDOW_TEXT_COLOR : B_WINDOW_INACTIVE_TEXT_COLOR));
++	FillRect(BRect(tab.left + 4, tab.top + 3, tab.left + tab.Width() * 0.6f,
++		tab.top + 4));
++
++	SetHighColor(_Color(B_PANEL_BACKGROUND_COLOR));
++	FillRect(body);
++	SetHighColor(_Color(active ? B_WINDOW_BORDER_COLOR
++		: B_WINDOW_INACTIVE_BORDER_COLOR));
++	StrokeRect(body);
++
++	if (!active)
++		return;
++
++	// a text line, a progress bar and a button
++	BRect inside = body.InsetByCopy(4, 3);
++	SetHighColor(_Color(B_PANEL_TEXT_COLOR));
++	FillRect(BRect(inside.left, inside.top + 1, inside.left + inside.Width() * 0.7f,
++		inside.top + 1));
++
++	BRect bar(inside.left, inside.top + 5, inside.right, inside.top + 8);
++	SetHighColor(_Color(B_CONTROL_BACKGROUND_COLOR));
++	FillRect(bar);
++	SetHighColor(_Color(B_STATUS_BAR_COLOR));
++	FillRect(BRect(bar.left, bar.top, bar.left + bar.Width() * 0.6f, bar.bottom));
++	SetHighColor(_Color(B_CONTROL_BORDER_COLOR));
++	StrokeRect(bar);
++
++	BRect button(inside.right - 16, bar.bottom + 3, inside.right,
++		min_c(bar.bottom + 9, inside.bottom));
++	SetHighColor(_Color(B_CONTROL_BACKGROUND_COLOR));
++	FillRoundRect(button, 2, 2);
++	SetHighColor(_Color(B_KEYBOARD_NAVIGATION_COLOR));
++	StrokeRoundRect(button, 2, 2);
++}
++
++
++void
++ThemeButton::Draw(BRect updateRect)
++{
++	const BRect thumbnail = _ThumbnailFrame();
++	const rgb_color panel = ui_color(B_PANEL_BACKGROUND_COLOR);
++
++	SetHighColor(panel);
++	FillRect(updateRect);
++
++	// selection ring, and a thin one for keyboard focus
++	if (Value() == B_CONTROL_ON || (IsFocus() && Window()->IsActive())) {
++		// the selection in the current accent, keyboard focus as usual
++		SetHighColor(ui_color(Value() == B_CONTROL_ON
++			? B_STATUS_BAR_COLOR : B_KEYBOARD_NAVIGATION_COLOR));
++		SetPenSize(Value() == B_CONTROL_ON ? kRing : 1);
++		StrokeRoundRect(thumbnail.InsetByCopy(-kRing + 0.5f, -kRing + 0.5f),
++			7, 7);
++		SetPenSize(1);
++	}
++
++	// the desktop: a soft gradient in the theme's accent
++	const rgb_color accent = _Color(B_STATUS_BAR_COLOR);
++	const bool dark = _Color(B_PANEL_BACKGROUND_COLOR).IsDark();
++	BGradientLinear gradient(thumbnail.LeftTop(), thumbnail.RightBottom());
++	gradient.AddColor(tint_color(accent, dark ? B_DARKEN_2_TINT : 0.4f), 0);
++	gradient.AddColor(tint_color(accent, dark ? B_DARKEN_4_TINT : 0.85f), 255);
++	FillRoundRect(thumbnail, 5, 5, gradient);
++
++	BRegion clip(thumbnail.InsetByCopy(1, 1));
++	ConstrainClippingRegion(&clip);
++	_DrawWindow(BRect(thumbnail.left + 5, thumbnail.top + 5,
++		thumbnail.left + floorf(thumbnail.Width() * 0.6f),
++		thumbnail.top + floorf(thumbnail.Height() * 0.55f)), false);
++	_DrawWindow(BRect(thumbnail.left + floorf(thumbnail.Width() * 0.28f),
++		thumbnail.top + floorf(thumbnail.Height() * 0.32f),
++		thumbnail.right - 5, thumbnail.bottom + 2), true);
++	ConstrainClippingRegion(NULL);
++
++	SetHighColor(tint_color(panel, panel.IsDark() ? 0.6f : B_DARKEN_2_TINT));
++	StrokeRoundRect(thumbnail, 5, 5);
++
++	// the label
++	BFont font(Value() == B_CONTROL_ON ? be_bold_font : be_plain_font);
++	SetFont(&font);
++	font_height height;
++	font.GetHeight(&height);
++	const char* label = Label() != NULL ? Label() : "";
++	const float width = font.StringWidth(label);
++	SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
++	if (!IsEnabled())
++		SetHighColor(tint_color(HighColor(), panel.IsDark() ? 0.6f : 0.4f));
++	DrawString(label, BPoint(floorf((Bounds().Width() - width) / 2),
++		thumbnail.bottom + kRing + kLabelSpacing + ceilf(height.ascent)));
++}
++
++
++void
++ThemeButton::MouseDown(BPoint where)
++{
++	if (!IsEnabled())
++		return;
++	if (Value() != B_CONTROL_ON)
++		Invoke();
++}
++
++
++void
++ThemeButton::KeyDown(const char* bytes, int32 numBytes)
++{
++	if (numBytes == 1 && (bytes[0] == B_SPACE || bytes[0] == B_ENTER)) {
++		if (IsEnabled() && Value() != B_CONTROL_ON)
++			Invoke();
++		return;
++	}
++	BControl::KeyDown(bytes, numBytes);
++}
++
++
++void
++ThemeButton::SetValue(int32 value)
++{
++	if (value != Value()) {
++		BControl::SetValueNoUpdate(value);
++		Invalidate();
++	}
++}
++
++
++BSize
++ThemeButton::MinSize()
++{
++	font_height height;
++	be_bold_font->GetHeight(&height);
++	const float labelWidth = Label() != NULL ? be_bold_font->StringWidth(Label()) : 0;
++	BSize size(max_c(kThumbnailWidth + 2 * kRing, ceilf(labelWidth) + 4),
++		kThumbnailHeight + 2 * kRing + kLabelSpacing
++			+ ceilf(height.ascent + height.descent));
++	return BLayoutUtils::ComposeSize(ExplicitMinSize(), size);
++}
++
++
++BSize
++ThemeButton::MaxSize()
++{
++	return BLayoutUtils::ComposeSize(ExplicitMaxSize(), MinSize());
++}
++
++
++BSize
++ThemeButton::PreferredSize()
++{
++	return BLayoutUtils::ComposeSize(ExplicitPreferredSize(), MinSize());
++}
+diff --git a/src/preferences/appearance/ThemeButton.h b/src/preferences/appearance/ThemeButton.h
+new file mode 100644
+index 00000000..5dd181e2
+--- /dev/null
++++ b/src/preferences/appearance/ThemeButton.h
+@@ -0,0 +1,41 @@
++/*
++ * Copyright 2026 Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef THEME_BUTTON_H
++#define THEME_BUTTON_H
++
++
++#include <Control.h>
++#include <Message.h>
++
++
++// A picture button: a small desktop with two windows drawn in a color set,
++// and a label under it. Value() B_CONTROL_ON draws it selected.
++class ThemeButton : public BControl {
++public:
++								ThemeButton(const char* name,
++									const char* label, BMessage* message);
++
++			void				SetColors(const BMessage& colors);
++
++	virtual	void				Draw(BRect updateRect);
++	virtual	void				MouseDown(BPoint where);
++	virtual	void				KeyDown(const char* bytes, int32 numBytes);
++	virtual	void				SetValue(int32 value);
++
++	virtual	BSize				MinSize();
++	virtual	BSize				MaxSize();
++	virtual	BSize				PreferredSize();
++
++private:
++			rgb_color			_Color(color_which which) const;
++			BRect				_ThumbnailFrame() const;
++			void				_DrawWindow(BRect frame, bool active);
++
++private:
++			BMessage			fColors;
++};
++
++
++#endif	// THEME_BUTTON_H
+-- 
+2.39.5
+

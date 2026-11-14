@@ -1,0 +1,663 @@
+From 97fd7dff0b860ea5e58aca9b09eda9c038c13c2a Mon Sep 17 00:00:00 2001
+From: bluevisor <bluevisor@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 12:44:00 +0000
+Subject: [PATCH 3/6] kernel/arm64: user debugging: breakpoints, single step,
+ traps
+
+- Software breakpoints (brk #0x4842). With no hardware breakpoints to swap
+  in, continuing from one takes it out, single-steps the thread over the
+  original instruction and puts it back from the step trap.
+- Single step through MDSCR_EL1.SS/PSTATE.SS; the OS lock is released
+  per CPU, MDSCR_EL1.SS is only set while returning to a stepping thread.
+- arch_set_debug_cpu_state(), arch_debug_get_interrupt_pc(), FP/SIMD
+  registers in arm64_debug_cpu_state.
+- Userland brk, undefined instructions, SP alignment and FP traps raise
+  signals (and debugger events) instead of panicking the kernel.
+- Sync the I-cache after the breakpoint manager writes code; fix the
+  I-cache line size computation in arch_cpu_sync_icache().
+---
+ headers/os/arch/arm64/arch_debugger.h         |   4 +
+ .../kernel/arch/arm64/arch_user_debugger.h    |  38 ++++
+ headers/private/kernel/user_debugger.h        |   1 +
+ src/system/kernel/arch/arm64/arch_cpu.cpp     |   8 +-
+ src/system/kernel/arch/arm64/arch_debug.cpp   |  14 +-
+ src/system/kernel/arch/arm64/arch_int.cpp     |  44 +++-
+ .../kernel/arch/arm64/arch_user_debugger.cpp  | 211 ++++++++++++++++--
+ src/system/kernel/debug/BreakpointManager.cpp |  35 +++
+ src/system/kernel/debug/BreakpointManager.h   |   1 +
+ src/system/kernel/debug/user_debugger.cpp     |  18 ++
+ 10 files changed, 348 insertions(+), 26 deletions(-)
+
+diff --git a/headers/os/arch/arm64/arch_debugger.h b/headers/os/arch/arm64/arch_debugger.h
+index 0f2487f7..3ac3bdcb 100644
+--- a/headers/os/arch/arm64/arch_debugger.h
++++ b/headers/os/arch/arm64/arch_debugger.h
+@@ -11,6 +11,10 @@ struct arm64_debug_cpu_state {
+ 	unsigned long sp;
+ 	unsigned long elr;
+ 	unsigned int  spsr;
++	unsigned int  fpsr;
++	unsigned int  fpcr;
++	unsigned int  _reserved;
++	unsigned long fp_q[32 * 2];	// v0-v31, low and high half each
+ } __attribute__((aligned(16)));
+ 
+ #endif	// _ARCH_ARM_DEBUGGER_H
+diff --git a/headers/private/kernel/arch/arm64/arch_user_debugger.h b/headers/private/kernel/arch/arm64/arch_user_debugger.h
+index 99ce0c6e..e7613e96 100644
+--- a/headers/private/kernel/arch/arm64/arch_user_debugger.h
++++ b/headers/private/kernel/arch/arm64/arch_user_debugger.h
+@@ -1,17 +1,55 @@
+ /*
+  * Copyright 2018, Jaroslaw Pelczar <jarek@jpelczar.com>
++ * Copyright 2026, Haiku, Inc. All rights reserved.
+  * Distributed under the terms of the MIT License.
+  */
+ #ifndef _KERNEL_ARCH_ARM64_ARCH_USER_DEBUGGER_H_
+ #define _KERNEL_ARCH_ARM64_ARCH_USER_DEBUGGER_H_
+ 
+ 
++#include <SupportDefs.h>
++
++
+ struct arch_team_debug_info {
++	int		dummy;
+ };
+ 
+ 
+ struct arch_thread_debug_info {
++	addr_t	step_over_address;
++		// a software breakpoint taken out for one instruction step
+ };
+ 
+ 
++// User breakpoints are software only: "brk #ARM64_BREAKPOINT_IMMEDIATE".
++// There is no resume flag as on x86, so to continue from one, the kernel
++// takes it out, single-steps the thread over the original instruction and
++// puts it back (DEBUG_SOFTWARE_BREAKPOINT_STEP_OVER).
++#define ARM64_BREAKPOINT_IMMEDIATE			0x4842
++#define ARM64_DEBUGTRAP_IMMEDIATE			0xf000
++	// __builtin_debugtrap()
++
++extern const uint8 kArm64SoftwareBreakpoint[4];
++
++#define DEBUG_SOFTWARE_BREAKPOINT			kArm64SoftwareBreakpoint
++#define DEBUG_SOFTWARE_BREAKPOINT_SIZE		4
++#define DEBUG_SOFTWARE_BREAKPOINT_STEP_OVER	1
++
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct iframe;
++
++bool arm64_handle_breakpoint_exception(struct iframe* frame);
++void arm64_handle_single_step_exception(struct iframe* frame);
++void arm64_update_debug_state_at_kernel_exit(struct iframe* frame);
++void arch_step_over_software_breakpoint(addr_t address);
++
++#ifdef __cplusplus
++}
++#endif
++
++
+ #endif /* _KERNEL_ARCH_ARM64_ARCH_USER_DEBUGGER_H_ */
+diff --git a/headers/private/kernel/user_debugger.h b/headers/private/kernel/user_debugger.h
+index 5fc082b4..d07c8e48 100644
+--- a/headers/private/kernel/user_debugger.h
++++ b/headers/private/kernel/user_debugger.h
+@@ -273,6 +273,7 @@ void user_debug_image_deleted(const image_info *imageInfo);
+ void user_debug_breakpoint_hit(bool software);
+ void user_debug_watchpoint_hit();
+ void user_debug_single_stepped();
++void user_debug_finish_breakpoint_step_over(void* address);
+ 
+ void user_debug_thread_unscheduled(Thread* thread);
+ void user_debug_thread_scheduled(Thread* thread);
+diff --git a/src/system/kernel/arch/arm64/arch_cpu.cpp b/src/system/kernel/arch/arm64/arch_cpu.cpp
+index 7ae9dc10..30b77b4f 100644
+--- a/src/system/kernel/arch/arm64/arch_cpu.cpp
++++ b/src/system/kernel/arch/arm64/arch_cpu.cpp
+@@ -94,6 +94,12 @@ arch_cpu_init_percpu(kernel_args *args, int curr_cpu)
+ 
+ 	WRITE_SPECIALREG(TCR_EL1, tcr);
+ 
++	// Self-hosted debug for the user debugger: the OS lock is set at reset
++	// and blocks software step exceptions; start with stepping off.
++	WRITE_SPECIALREG(OSLAR_EL1, 0);
++	WRITE_SPECIALREG(MDSCR_EL1, 0);
++	asm volatile("isb" ::: "memory");
++
+ 	gCPU[curr_cpu].arch.mpidr = READ_SPECIALREG(MPIDR_EL1);
+ 	gCPU[curr_cpu].arch.midr = READ_SPECIALREG(MIDR_EL1);
+ 
+@@ -150,7 +156,7 @@ arch_cpu_sync_icache(void *address, size_t len)
+ 	uint64_t ctr_el0 = 0;
+ 	asm volatile ("mrs\t%0, ctr_el0":"=r" (ctr_el0));
+ 
+-	uint64_t icache_line_size = 4 << (ctr_el0 << 0xF);
++	uint64_t icache_line_size = 4 << (ctr_el0 & 0xF);
+ 	uint64_t dcache_line_size = 4 << ((ctr_el0 >> 16) & 0xF);
+ 	uint64_t addr = (uint64_t)address;
+ 	uint64_t end = addr + len;
+diff --git a/src/system/kernel/arch/arm64/arch_debug.cpp b/src/system/kernel/arch/arm64/arch_debug.cpp
+index 666e56ea..9f17e049 100644
+--- a/src/system/kernel/arch/arm64/arch_debug.cpp
++++ b/src/system/kernel/arch/arm64/arch_debug.cpp
+@@ -377,7 +377,19 @@ arch_get_stack_trace(addr_t* returnAddresses, int32 maxCount,
+ void*
+ arch_debug_get_interrupt_pc(bool* _isSyscall)
+ {
+-	return NULL;
++	Thread* thread = thread_get_current_thread();
++	if (thread == NULL)
++		return NULL;
++
++	iframe_stack* iframes = &thread->arch_info.iframes;
++	if (iframes->index <= 0)
++		return NULL;
++
++	iframe* frame = iframes->frames[iframes->index - 1];
++	if (_isSyscall != NULL)
++		*_isSyscall = ESR_ELx_EXCEPTION(frame->esr) == EXCP_SVC64;
++
++	return (void*)frame->elr;
+ }
+ 
+ 
+diff --git a/src/system/kernel/arch/arm64/arch_int.cpp b/src/system/kernel/arch/arm64/arch_int.cpp
+index fbf09b8d..0d07b577 100644
+--- a/src/system/kernel/arch/arm64/arch_int.cpp
++++ b/src/system/kernel/arch/arm64/arch_int.cpp
+@@ -5,6 +5,7 @@
+ #include <interrupts.h>
+ 
+ #include <arch/smp.h>
++#include <arch/user_debugger.h>
+ #include <boot/kernel_args.h>
+ #include <device_manager.h>
+ #include <kscheduler.h>
+@@ -234,6 +235,9 @@ public:
+ 			} else {
+ 				thread_at_kernel_exit_no_signals();
+ 			}
++			disable_interrupts();
++			arm64_update_debug_state_at_kernel_exit(frame);
++
+ 			if ((THREAD_FLAGS_RESTART_SYSCALL & thread_get_current_thread()->flags) != 0) {
+ 				atomic_and(&thread_get_current_thread()->flags, ~THREAD_FLAGS_RESTART_SYSCALL);
+ 				atomic_or(&thread_get_current_thread()->flags, THREAD_FLAGS_SYSCALL_RESTARTED);
+@@ -259,10 +263,10 @@ do_sync_handler(iframe * frame)
+ #endif
+ 
+ 	InterruptScope scope(frame);
+-	debug_exception_type exceptionType;
+-	uint32 signalNumber;
+-	int32 signalCode;
+-	uint64 signalAddress = 0;
++	debug_exception_type exceptionType = B_INVALID_OPCODE_EXCEPTION;
++	uint32 signalNumber = SIGILL;
++	int32 signalCode = ILL_ILLOPC;
++	uint64 signalAddress = frame->elr;
+ 
+ 	bool isUser = (frame->spsr & PSR_M_MASK) == PSR_M_EL0t;
+ 	bool isExec = false;
+@@ -387,8 +391,38 @@ do_sync_handler(iframe * frame)
+ 			return;
+ 		}
+ 
++		case EXCP_BRK:
++			if (!isUser)
++				break;
++			if (arm64_handle_breakpoint_exception(frame))
++				return;
++			// a trap the program planted, e.g. __builtin_trap()
++			signalNumber = SIGTRAP;
++			signalCode = TRAP_BRKPT;
++			break;
++
++		case EXCP_SOFTSTP_EL0:
++			arm64_handle_single_step_exception(frame);
++			return;
++
++		case EXCP_SP_ALIGN:
++			exceptionType = B_ALIGNMENT_EXCEPTION;
++			signalNumber = SIGBUS;
++			signalCode = BUS_ADRALN;
++			signalAddress = frame->sp;
++			break;
++
++		case EXCP_TRAP_FP:
++			exceptionType = B_FLOATING_POINT_EXCEPTION;
++			signalNumber = SIGFPE;
++			signalCode = FPE_FLTINV;
++			break;
++
+ 		default:
+-			panic("unhandled exception: %" B_PRIu64, ESR_ELx_EXCEPTION(frame->esr));
++			// undefined instructions (EXCP_UNKNOWN), illegal execution state,
++			// trapped system register accesses, ...: SIGILL for userland,
++			// a panic below for the kernel
++			break;
+ 	}
+ 
+ 	if (isUser) {
+diff --git a/src/system/kernel/arch/arm64/arch_user_debugger.cpp b/src/system/kernel/arch/arm64/arch_user_debugger.cpp
+index 7c590560..d3b7f44a 100644
+--- a/src/system/kernel/arch/arm64/arch_user_debugger.cpp
++++ b/src/system/kernel/arch/arm64/arch_user_debugger.cpp
+@@ -7,45 +7,146 @@
+ 
+ #include <debugger.h>
+ #include <interrupts.h>
++#include <smp.h>
+ #include <thread.h>
++#include <user_debugger.h>
+ #include <arch/user_debugger.h>
+ 
+ #include "arm_registers.h"
+ 
+ 
++//#define TRACE_ARCH_USER_DEBUGGER
++#ifdef TRACE_ARCH_USER_DEBUGGER
++#	define TRACE(x...) dprintf(x)
++#else
++#	define TRACE(x...) ;
++#endif
++
++
++// brk #ARM64_BREAKPOINT_IMMEDIATE, little endian
++#define BRK_INSTRUCTION (0xd4200000 | (ARM64_BREAKPOINT_IMMEDIATE << 5))
++const uint8 kArm64SoftwareBreakpoint[4] = {
++	BRK_INSTRUCTION & 0xff, (BRK_INSTRUCTION >> 8) & 0xff,
++	(BRK_INSTRUCTION >> 16) & 0xff, BRK_INSTRUCTION >> 24
++};
++
++#define MDSCR_SS	(1 << 0)
++	// software step enable
++
++static bool sCpuSingleStepping[SMP_MAX_CPUS];
++
++
++static iframe*
++arm64_get_user_iframe(Thread* thread)
++{
++	iframe_stack* iframes = &thread->arch_info.iframes;
++
++	// walk outwards from the innermost frame, skipping any kernel frames
++	for (int32 i = iframes->index - 1; i >= 0; i--) {
++		iframe* frame = iframes->frames[i];
++		if ((frame->spsr & PSR_M_MASK) == PSR_M_EL0t)
++			return frame;
++	}
++
++	return NULL;
++}
++
++
++static bool
++thread_wants_single_step(Thread* thread)
++{
++	return (thread->flags & THREAD_FLAGS_SINGLE_STEP) != 0
++		|| thread->debug_info.arch_info.step_over_address != 0;
++}
++
++
+ void
+ arch_clear_team_debug_info(struct arch_team_debug_info *info)
+ {
++	info->dummy = 0;
+ }
+ 
+ 
+ void
+ arch_destroy_team_debug_info(struct arch_team_debug_info *info)
+ {
++	arch_clear_team_debug_info(info);
+ }
+ 
+ 
+ void
+ arch_clear_thread_debug_info(struct arch_thread_debug_info *info)
+ {
++	info->step_over_address = 0;
+ }
+ 
+ 
+ void
+ arch_destroy_thread_debug_info(struct arch_thread_debug_info *info)
+ {
++	arch_clear_thread_debug_info(info);
+ }
+ 
+ 
++/*!	Arms (or disarms) single-stepping of the current thread's userland
++	frame, according to THREAD_FLAGS_SINGLE_STEP. The CPU side (MDSCR_EL1)
++	follows when the thread returns to userland.
++*/
+ void
+ arch_update_thread_single_step()
+ {
++	Thread* thread = thread_get_current_thread();
++	iframe* frame = arm64_get_user_iframe(thread);
++	if (frame == NULL)
++		return;
++
++	// PSTATE.SS set on return: execute one instruction, then trap
++	if (thread_wants_single_step(thread))
++		frame->spsr |= PSR_SS;
++	else
++		frame->spsr &= ~(uint64)PSR_SS;
++}
++
++
++void
++arch_step_over_software_breakpoint(addr_t address)
++{
++	Thread* thread = thread_get_current_thread();
++	iframe* frame = arm64_get_user_iframe(thread);
++	if (frame == NULL)
++		return;
++
++	TRACE("arm64: thread %" B_PRId32 " steps over breakpoint %#lx\n",
++		thread->id, address);
++	thread->debug_info.arch_info.step_over_address = address;
++	frame->spsr |= PSR_SS;
++}
++
++
++static void
++set_cpu_state(iframe* frame, const debug_cpu_state* cpuState)
++{
++	memcpy(frame->x, cpuState->x, sizeof(frame->x));
++	frame->fp = cpuState->x[29];
++	frame->lr = cpuState->lr;
++	frame->sp = cpuState->sp;
++	frame->elr = cpuState->elr;
++
++	// only the condition flags may be changed
++	const uint64 kFlags = 0xf0000000;
++	frame->spsr = (frame->spsr & ~kFlags) | (cpuState->spsr & kFlags);
++
++	memcpy(frame->fpu.regs, cpuState->fp_q, sizeof(frame->fpu.regs));
++	frame->fpu.fpsr = cpuState->fpsr;
++	frame->fpu.fpcr = cpuState->fpcr;
+ }
+ 
+ 
+ void
+ arch_set_debug_cpu_state(const debug_cpu_state *cpuState)
+ {
++	if (iframe* frame = arm64_get_user_iframe(thread_get_current_thread()))
++		set_cpu_state(frame, cpuState);
+ }
+ 
+ 
+@@ -53,28 +154,17 @@ static void
+ get_cpu_state(iframe* frame, debug_cpu_state* cpuState)
+ {
+ 	// iframe stores x0-x28 in x[], with x29 (the frame pointer) separate
++	memset(cpuState, 0, sizeof(*cpuState));
+ 	memcpy(cpuState->x, frame->x, sizeof(frame->x));
+ 	cpuState->x[29] = frame->fp;
+ 	cpuState->lr = frame->lr;
+ 	cpuState->sp = frame->sp;
+ 	cpuState->elr = frame->elr;
+ 	cpuState->spsr = frame->spsr;
+-}
+-
+ 
+-static iframe*
+-arm64_get_user_iframe(Thread* thread)
+-{
+-	iframe_stack* iframes = &thread->arch_info.iframes;
+-
+-	// walk outwards from the innermost frame, skipping any kernel frames
+-	for (int32 i = iframes->index - 1; i >= 0; i--) {
+-		iframe* frame = iframes->frames[i];
+-		if ((frame->spsr & PSR_M_MASK) == PSR_M_EL0t)
+-			return frame;
+-	}
+-
+-	return NULL;
++	memcpy(cpuState->fp_q, frame->fpu.regs, sizeof(cpuState->fp_q));
++	cpuState->fpsr = frame->fpu.fpsr;
++	cpuState->fpcr = frame->fpu.fpcr;
+ }
+ 
+ 
+@@ -98,31 +188,34 @@ arch_get_thread_debug_cpu_state(Thread *thread, debug_cpu_state *cpuState)
+ }
+ 
+ 
++// There are no hardware break- or watchpoints (DEBUG_MAX_BREAKPOINTS and
++// DEBUG_MAX_WATCHPOINTS are 0), the BreakpointManager uses software ones.
++
+ status_t
+ arch_set_breakpoint(void *address)
+ {
+-	return B_ERROR;
++	return B_NOT_SUPPORTED;
+ }
+ 
+ 
+ status_t
+ arch_clear_breakpoint(void *address)
+ {
+-	return B_ERROR;
++	return B_NOT_SUPPORTED;
+ }
+ 
+ 
+ status_t
+ arch_set_watchpoint(void *address, uint32 type, int32 length)
+ {
+-	return B_ERROR;
++	return B_NOT_SUPPORTED;
+ }
+ 
+ 
+ status_t
+ arch_clear_watchpoint(void *address)
+ {
+-	return B_ERROR;
++	return B_NOT_SUPPORTED;
+ }
+ 
+ 
+@@ -131,3 +224,83 @@ arch_has_breakpoints(struct arch_team_debug_info *info)
+ {
+ 	return false;
+ }
++
++
++/*!	A "brk" from userland; interrupts are disabled.
++	Returns \c false, if this is a trap the program planted itself (like
++	__builtin_trap()), which the caller turns into a SIGTRAP.
++*/
++bool
++arm64_handle_breakpoint_exception(iframe* frame)
++{
++	uint32 immediate = frame->esr & 0xffff;
++	switch (immediate) {
++		case ARM64_BREAKPOINT_IMMEDIATE:
++			// one of ours: report it at the breakpoint's address
++			break;
++
++		case ARM64_DEBUGTRAP_IMMEDIATE:
++			// __builtin_debugtrap(): like int3 on x86, continuing goes on
++			// with the next instruction
++			frame->elr += 4;
++			break;
++
++		default:
++			return false;
++	}
++
++	enable_interrupts();
++	user_debug_breakpoint_hit(true);
++	return true;
++}
++
++
++/*!	A software step exception from userland; interrupts are disabled.
++*/
++void
++arm64_handle_single_step_exception(iframe* frame)
++{
++	Thread* thread = thread_get_current_thread();
++
++	enable_interrupts();
++
++	addr_t stepOverAddress = thread->debug_info.arch_info.step_over_address;
++	if (stepOverAddress != 0) {
++		thread->debug_info.arch_info.step_over_address = 0;
++		user_debug_finish_breakpoint_step_over((void*)stepOverAddress);
++	}
++
++	if ((thread->flags & THREAD_FLAGS_SINGLE_STEP) != 0)
++		user_debug_single_stepped();
++
++	// Otherwise this was a step over a breakpoint only, or a stale MDSCR_EL1
++	// from another thread: the kernel exit drops the step state.
++}
++
++
++/*!	Called right before returning to userland, with interrupts disabled.
++	MDSCR_EL1.SS is per CPU; only set it while returning to a thread that
++	is being single-stepped, or every thread would trap after its first
++	instruction.
++*/
++void
++arm64_update_debug_state_at_kernel_exit(iframe* frame)
++{
++	Thread* thread = thread_get_current_thread();
++	bool step = thread_wants_single_step(thread);
++
++	int32 cpu = smp_get_current_cpu();
++	if (sCpuSingleStepping[cpu] != step) {
++		uint64 mdscr = READ_SPECIALREG(MDSCR_EL1);
++		if (step)
++			mdscr |= MDSCR_SS;
++		else
++			mdscr &= ~(uint64)MDSCR_SS;
++		WRITE_SPECIALREG(MDSCR_EL1, mdscr);
++		asm volatile("isb" ::: "memory");
++		sCpuSingleStepping[cpu] = step;
++	}
++
++	if (!step)
++		frame->spsr &= ~(uint64)PSR_SS;
++}
+diff --git a/src/system/kernel/debug/BreakpointManager.cpp b/src/system/kernel/debug/BreakpointManager.cpp
+index f105a404..bf2c2b51 100644
+--- a/src/system/kernel/debug/BreakpointManager.cpp
++++ b/src/system/kernel/debug/BreakpointManager.cpp
+@@ -5,6 +5,8 @@
+ 
+ #include "BreakpointManager.h"
+ 
++#include <arch/cpu.h>
++
+ #include <algorithm>
+ 
+ #include <AutoDeleter.h>
+@@ -434,6 +436,19 @@ BreakpointManager::PrepareToContinue(void* _address)
+ 	if (installed == NULL || !installed->breakpoint->software)
+ 		return;
+ 
++#ifdef DEBUG_SOFTWARE_BREAKPOINT_STEP_OVER
++	// There are no hardware breakpoints to swap in. Put the original
++	// instruction back for one step; the architecture's single-step trap
++	// calls FinishStepOver() to reinstall the breakpoint.
++	size_t bytesWritten;
++	if (_WriteMemory(address, installed->breakpoint->softwareData,
++			DEBUG_SOFTWARE_BREAKPOINT_SIZE, bytesWritten) == B_OK
++		&& bytesWritten == DEBUG_SOFTWARE_BREAKPOINT_SIZE) {
++		arch_step_over_software_breakpoint(address);
++	}
++	return;
++#endif
++
+ 	// We need to replace the software breakpoint by a hardware one, or
+ 	// we can't continue the thread.
+ 	Breakpoint* breakpoint = _GetUnusedHardwareBreakpoint(true);
+@@ -453,6 +468,24 @@ BreakpointManager::PrepareToContinue(void* _address)
+ }
+ 
+ 
++void
++BreakpointManager::FinishStepOver(void* _address)
++{
++	const addr_t address = (addr_t)_address;
++
++	WriteLocker locker(fLock);
++
++	// the debugger may have removed the breakpoint in the meantime
++	InstalledBreakpoint* installed = fBreakpoints.Lookup(address);
++	if (installed == NULL || !installed->breakpoint->software)
++		return;
++
++	size_t bytesWritten;
++	_WriteMemory(address, DEBUG_SOFTWARE_BREAKPOINT,
++		DEBUG_SOFTWARE_BREAKPOINT_SIZE, bytesWritten);
++}
++
++
+ BreakpointManager::Breakpoint*
+ BreakpointManager::_GetUnusedHardwareBreakpoint(bool force)
+ {
+@@ -748,6 +781,8 @@ BreakpointManager::_WriteMemory(addr_t _address, const void* _buffer,
+ 
+ 		// copy the memory
+ 		error = user_memcpy(address, buffer, toWrite);
++		if (error == B_OK)
++			arch_cpu_sync_icache(address, toWrite);
+ 
+ 		// reset the area protection
+ 		if (protectionChanged)
+diff --git a/src/system/kernel/debug/BreakpointManager.h b/src/system/kernel/debug/BreakpointManager.h
+index a20ea2a2..8d9314cf 100644
+--- a/src/system/kernel/debug/BreakpointManager.h
++++ b/src/system/kernel/debug/BreakpointManager.h
+@@ -37,6 +37,7 @@ public:
+ 									size_t size, size_t& bytesWritten);
+ 
+ 			void				PrepareToContinue(void* address);
++			void				FinishStepOver(void* address);
+ 
+ private:
+ 			struct InstalledBreakpoint;
+diff --git a/src/system/kernel/debug/user_debugger.cpp b/src/system/kernel/debug/user_debugger.cpp
+index 9eeb05ff..a59e14f4 100644
+--- a/src/system/kernel/debug/user_debugger.cpp
++++ b/src/system/kernel/debug/user_debugger.cpp
+@@ -817,6 +817,24 @@ thread_hit_debug_event(debug_debugger_message event, const void *message,
+ }
+ 
+ 
++/*!	Puts back a software breakpoint the current thread has just stepped
++	over (DEBUG_SOFTWARE_BREAKPOINT_STEP_OVER architectures).
++*/
++void
++user_debug_finish_breakpoint_step_over(void* address)
++{
++	Team* team = thread_get_current_thread()->team;
++	ConditionVariable debugChangeCondition;
++	debugChangeCondition.Init(team, "debug change condition");
++	prepare_debugger_change(team, debugChangeCondition);
++
++	if (team->debug_info.breakpoint_manager != NULL)
++		team->debug_info.breakpoint_manager->FinishStepOver(address);
++
++	finish_debugger_change(team);
++}
++
++
+ static status_t
+ thread_hit_serious_debug_event(debug_debugger_message event,
+ 	const void *message, int32 messageSize)
+-- 
+2.39.5
+

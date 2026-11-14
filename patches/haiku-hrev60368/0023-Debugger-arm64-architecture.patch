@@ -1,0 +1,1624 @@
+From 2f20178b01b4a5f4fde191fef08cd6e4f3987e78 Mon Sep 17 00:00:00 2001
+From: bluevisor <bluevisor@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 12:45:06 +0000
+Subject: [PATCH 4/6] Debugger: arm64 architecture
+
+- ArchitectureArm64/CpuStateArm64: x0-x30, sp, pc, cpsr, fpsr, fpcr,
+  v0-v31; DWARF register map; frame record (x29/x30) unwinding with the
+  link register for leaf and not yet set up frames; PLT stub resolution.
+- Disassembly with Capstone (static, HAIKU_CAPSTONE_DIR); calls and
+  jumps are classified by hand for stepping.
+- DWARF CFI: on CPUs with a link register the caller's pc is the unwound
+  REGISTER_TYPE_RETURN_ADDRESS register.
+- Debugger: link a static libedit (HAIKU_LIBEDIT_DIR) when there is no
+  libedit package, and ship the Debugger without that condition.
+---
+ build/jam/images/definitions/minimum          |   2 +-
+ src/apps/debugger/Jamfile                     |  19 +-
+ src/kits/debugger/Jamfile                     |  21 +
+ .../debugger/arch/arm64/ArchitectureArm64.cpp | 657 ++++++++++++++++++
+ .../debugger/arch/arm64/ArchitectureArm64.h   | 103 +++
+ .../arch/arm64/Arm64AssemblyLanguage.h        |  18 +
+ .../debugger/arch/arm64/CpuStateArm64.cpp     | 211 ++++++
+ src/kits/debugger/arch/arm64/CpuStateArm64.h  |  88 +++
+ .../arch/arm64/disasm/DisassemblerArm64.cpp   | 224 ++++++
+ .../arch/arm64/disasm/DisassemblerArm64.h     |  55 ++
+ src/kits/debugger/arch/arm64/disasm/Jamfile   |  19 +
+ .../debug_info/DwarfImageDebugInfo.cpp        |  14 +
+ .../local/LocalDebuggerInterface.cpp          |   5 +
+ 13 files changed, 1432 insertions(+), 4 deletions(-)
+ create mode 100644 src/kits/debugger/arch/arm64/ArchitectureArm64.cpp
+ create mode 100644 src/kits/debugger/arch/arm64/ArchitectureArm64.h
+ create mode 100644 src/kits/debugger/arch/arm64/Arm64AssemblyLanguage.h
+ create mode 100644 src/kits/debugger/arch/arm64/CpuStateArm64.cpp
+ create mode 100644 src/kits/debugger/arch/arm64/CpuStateArm64.h
+ create mode 100644 src/kits/debugger/arch/arm64/disasm/DisassemblerArm64.cpp
+ create mode 100644 src/kits/debugger/arch/arm64/disasm/DisassemblerArm64.h
+ create mode 100644 src/kits/debugger/arch/arm64/disasm/Jamfile
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index f493f671..e693a44b 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -129,7 +129,7 @@ SYSTEM_APPS = [ FFilterByBuildFeatures
+ 	AboutSystem
+ 	BootManager@x86,x86_64
+ 	CharacterMap
+-	Debugger@libedit
++	Debugger
+ 	DeskCalc
+ 	Devices
+ 	DiskProbe
+diff --git a/src/apps/debugger/Jamfile b/src/apps/debugger/Jamfile
+index 04271beb..66216c0c 100644
+--- a/src/apps/debugger/Jamfile
++++ b/src/apps/debugger/Jamfile
+@@ -28,7 +28,20 @@ UsePrivateHeaders [ FDirName debugger value values ] ;
+ UsePrivateHeaders app interface shared system ;
+ UsePrivateSystemHeaders ;
+ 
+-UseBuildFeatureHeaders libedit ;
++local libeditHeaders ;
++local libeditLibraries ;
++if [ FIsBuildFeatureEnabled libedit ] {
++	UseBuildFeatureHeaders libedit ;
++	libeditHeaders = [ BuildFeatureAttribute libedit : headers ] ;
++	libeditLibraries = [ BuildFeatureAttribute libedit : library ] ;
++} else {
++	# no libedit package (arm64): the bootstrap's
++	# scripts/container/build-libedit.sh builds a static one
++	HAIKU_LIBEDIT_DIR ?= /build/deps/libedit-arm64 ;
++	SubDirSysHdrs [ FDirName $(HAIKU_LIBEDIT_DIR) include ] ;
++	libeditLibraries = $(HAIKU_LIBEDIT_DIR)/lib/libedit.a ;
++}
++UseBuildFeatureHeaders ncurses ;
+ 
+ LINKFLAGS += -Wl,--exclude-libs,ALL ;
+ 
+@@ -181,7 +194,7 @@ local sources =
+ 
+ Includes [ FGristFiles $(sources) ] :
+ 	[ BuildFeatureAttribute ncurses : headers ]
+-	[ BuildFeatureAttribute libedit : headers ]
++	$(libeditHeaders)
+ ;
+ 
+ Application Debugger :
+@@ -195,8 +208,8 @@ Application Debugger :
+ 	[ TargetLibstdc++ ]
+ 	be package tracker libbsd.so libdebugger.so
+ 
++	$(libeditLibraries)
+ 	[ BuildFeatureAttribute ncurses : library ]
+-	[ BuildFeatureAttribute libedit : library ]
+ 
+ 	: Debugger.rdef
+ ;
+diff --git a/src/kits/debugger/Jamfile b/src/kits/debugger/Jamfile
+index 1809143f..43ba5c50 100644
+--- a/src/kits/debugger/Jamfile
++++ b/src/kits/debugger/Jamfile
+@@ -37,6 +37,7 @@ LINKFLAGS += -Wl,--exclude-libs,ALL ;
+ SEARCH_SOURCE += [ FDirName $(SUBDIR) arch ] ;
+ SEARCH_SOURCE += [ FDirName $(SUBDIR) arch x86 ] ;
+ SEARCH_SOURCE += [ FDirName $(SUBDIR) arch x86_64 ] ;
++SEARCH_SOURCE += [ FDirName $(SUBDIR) arch arm64 ] ;
+ SEARCH_SOURCE += [ FDirName $(SUBDIR) controllers ] ;
+ SEARCH_SOURCE += [ FDirName $(SUBDIR) debug_info ] ;
+ SEARCH_SOURCE += [ FDirName $(SUBDIR) debug_info loading_state_handlers ] ;
+@@ -338,15 +339,32 @@ Includes [ FGristFiles $(sources) ] :
+ 	<syscalls!$(TARGET_PACKAGING_ARCH)>syscall_numbers.h
+ ;
+ 
++# The arm64 architecture disassembles with Capstone, built by the
++# bootstrap's scripts/container/build-capstone.sh.
++local arm64Objects ;
++local arm64Libraries ;
++if $(TARGET_ARCH) = arm64 {
++	HAIKU_CAPSTONE_DIR ?= /build/deps/capstone-arm64 ;
++	sources +=
++		# arch/arm64
++		ArchitectureArm64.cpp
++		CpuStateArm64.cpp
++	;
++	arm64Objects = <nogrist>Debugger_disasm_arm64.o ;
++	arm64Libraries = $(HAIKU_CAPSTONE_DIR)/lib/libcapstone.a ;
++}
++
+ SharedLibrary libdebugger.so :
+ 	$(sources)
+ 	:
+ 	<nogrist>Debugger_demangler.o
+ 	<nogrist>Debugger_disasm_x86.o
+ 	<nogrist>Debugger_disasm_x86_64.o
++	$(arm64Objects)
+ 	<nogrist>Debugger_dwarf.o
+ 
+ 	libzydis.a
++	$(arm64Libraries)
+ 	<bin>debug_utils.a
+ 	shared
+ 
+@@ -356,5 +374,8 @@ SharedLibrary libdebugger.so :
+ 
+ HaikuSubInclude arch x86 disasm ;
+ HaikuSubInclude arch x86_64 disasm ;
++if $(TARGET_ARCH) = arm64 {
++	HaikuSubInclude arch arm64 disasm ;
++}
+ HaikuSubInclude demangler ;
+ HaikuSubInclude dwarf ;
+diff --git a/src/kits/debugger/arch/arm64/ArchitectureArm64.cpp b/src/kits/debugger/arch/arm64/ArchitectureArm64.cpp
+new file mode 100644
+index 00000000..4d3c2854
+--- /dev/null
++++ b/src/kits/debugger/arch/arm64/ArchitectureArm64.cpp
+@@ -0,0 +1,657 @@
++/*
++ * Copyright 2026, Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "ArchitectureArm64.h"
++
++#include <new>
++
++#include <stdio.h>
++#include <string.h>
++
++#include <String.h>
++
++#include <AutoDeleter.h>
++
++#include "Arm64AssemblyLanguage.h"
++#include "CfaContext.h"
++#include "CpuStateArm64.h"
++#include "DisassembledCode.h"
++#include "FunctionDebugInfo.h"
++#include "InstructionInfo.h"
++#include "NoOpStackFrameDebugInfo.h"
++#include "RegisterMap.h"
++#include "StackFrame.h"
++#include "Statement.h"
++#include "TeamMemory.h"
++#include "ValueLocation.h"
++
++#include "disasm/DisassemblerArm64.h"
++
++
++// DWARF register numbers for AArch64 (the "DWARF for the Arm 64-bit
++// Architecture" ABI): x0-x30 are 0-30, sp is 31, pc 32, v0-v31 64-95.
++static const int32 kDwarfPC = 32;
++static const int32 kDwarfV0 = 64;
++static const int32 kFromDwarfRegisterCount = kDwarfV0 + 32;
++
++// The standard frame record: "stp x29, x30, [sp, #-N]!; mov x29, sp".
++static const uint32 kFunctionPrologueSize = 8;
++
++
++// #pragma mark - FromDwarfRegisterMap
++
++
++struct ArchitectureArm64::FromDwarfRegisterMap : RegisterMap {
++	FromDwarfRegisterMap()
++	{
++		for (int32 i = 0; i < kFromDwarfRegisterCount; i++)
++			fIndices[i] = -1;
++		for (int32 i = 0; i <= 30; i++)
++			fIndices[i] = ARM64_REGISTER_X0 + i;
++		fIndices[31] = ARM64_REGISTER_SP;
++		fIndices[kDwarfPC] = ARM64_REGISTER_PC;
++		for (int32 i = 0; i < 32; i++)
++			fIndices[kDwarfV0 + i] = ARM64_REGISTER_V0 + i;
++	}
++
++	virtual int32 CountRegisters() const
++	{
++		return kFromDwarfRegisterCount;
++	}
++
++	virtual int32 MapRegisterIndex(int32 index) const
++	{
++		return index >= 0 && index < kFromDwarfRegisterCount
++			? fIndices[index] : -1;
++	}
++
++private:
++	int32	fIndices[kFromDwarfRegisterCount];
++};
++
++
++// #pragma mark - ToDwarfRegisterMap
++
++
++struct ArchitectureArm64::ToDwarfRegisterMap : RegisterMap {
++	ToDwarfRegisterMap(const FromDwarfRegisterMap& fromDwarf)
++	{
++		for (int32 i = 0; i < ARM64_REGISTER_COUNT; i++)
++			fIndices[i] = -1;
++		for (int32 i = 0; i < kFromDwarfRegisterCount; i++) {
++			int32 index = fromDwarf.MapRegisterIndex(i);
++			if (index >= 0)
++				fIndices[index] = i;
++		}
++	}
++
++	virtual int32 CountRegisters() const
++	{
++		return ARM64_REGISTER_COUNT;
++	}
++
++	virtual int32 MapRegisterIndex(int32 index) const
++	{
++		return index >= 0 && index < ARM64_REGISTER_COUNT
++			? fIndices[index] : -1;
++	}
++
++private:
++	int32	fIndices[ARM64_REGISTER_COUNT];
++};
++
++
++// #pragma mark - ArchitectureArm64
++
++
++ArchitectureArm64::ArchitectureArm64(TeamMemory* teamMemory)
++	:
++	Architecture(teamMemory, 8, sizeof(arm64_debug_cpu_state), false),
++	fAssemblyLanguage(NULL),
++	fToDwarfRegisterMap(NULL),
++	fFromDwarfRegisterMap(NULL)
++{
++}
++
++
++ArchitectureArm64::~ArchitectureArm64()
++{
++	if (fToDwarfRegisterMap != NULL)
++		fToDwarfRegisterMap->ReleaseReference();
++	if (fFromDwarfRegisterMap != NULL)
++		fFromDwarfRegisterMap->ReleaseReference();
++	if (fAssemblyLanguage != NULL)
++		fAssemblyLanguage->ReleaseReference();
++}
++
++
++status_t
++ArchitectureArm64::Init()
++{
++	fAssemblyLanguage = new(std::nothrow) Arm64AssemblyLanguage;
++	if (fAssemblyLanguage == NULL)
++		return B_NO_MEMORY;
++
++	try {
++		// in index order: the generic code looks registers up by index
++		// AAPCS64: x19-x28 are callee saved
++		for (int32 i = 0; i <= 28; i++) {
++			char name[8];
++			snprintf(name, sizeof(name), "x%" B_PRId32, i);
++			_AddIntegerRegister(ARM64_REGISTER_X0 + i, strdup(name),
++				B_UINT64_TYPE, REGISTER_TYPE_GENERAL_PURPOSE,
++				i >= 19 && i <= 28);
++		}
++
++		_AddIntegerRegister(ARM64_REGISTER_FP, "fp", B_UINT64_TYPE,
++			REGISTER_TYPE_GENERAL_PURPOSE, true);
++		_AddIntegerRegister(ARM64_REGISTER_LR, "lr", B_UINT64_TYPE,
++			REGISTER_TYPE_RETURN_ADDRESS, false);
++		_AddIntegerRegister(ARM64_REGISTER_SP, "sp", B_UINT64_TYPE,
++			REGISTER_TYPE_STACK_POINTER, true);
++		_AddIntegerRegister(ARM64_REGISTER_PC, "pc", B_UINT64_TYPE,
++			REGISTER_TYPE_INSTRUCTION_POINTER, false);
++
++		_AddIntegerRegister(ARM64_REGISTER_CPSR, "cpsr", B_UINT32_TYPE,
++			REGISTER_TYPE_SPECIAL_PURPOSE, true);
++		_AddIntegerRegister(ARM64_REGISTER_FPSR, "fpsr", B_UINT32_TYPE,
++			REGISTER_TYPE_SPECIAL_PURPOSE, true);
++		_AddIntegerRegister(ARM64_REGISTER_FPCR, "fpcr", B_UINT32_TYPE,
++			REGISTER_TYPE_SPECIAL_PURPOSE, true);
++
++		// v8-v15 are callee saved (their low 64 bits)
++		for (int32 i = 0; i < 32; i++) {
++			char name[8];
++			snprintf(name, sizeof(name), "v%" B_PRId32, i);
++			_AddSIMDRegister(ARM64_REGISTER_V0 + i, strdup(name),
++				i >= 8 && i <= 15);
++		}
++	} catch (std::bad_alloc&) {
++		return B_NO_MEMORY;
++	}
++
++	fFromDwarfRegisterMap = new(std::nothrow) FromDwarfRegisterMap;
++	if (fFromDwarfRegisterMap == NULL)
++		return B_NO_MEMORY;
++	fToDwarfRegisterMap = new(std::nothrow) ToDwarfRegisterMap(
++		*fFromDwarfRegisterMap);
++	if (fToDwarfRegisterMap == NULL)
++		return B_NO_MEMORY;
++
++	return B_OK;
++}
++
++
++int32
++ArchitectureArm64::StackGrowthDirection() const
++{
++	return STACK_GROWTH_DIRECTION_NEGATIVE;
++}
++
++
++int32
++ArchitectureArm64::CountRegisters() const
++{
++	return fRegisters.Count();
++}
++
++
++const Register*
++ArchitectureArm64::Registers() const
++{
++	return fRegisters.Elements();
++}
++
++
++status_t
++ArchitectureArm64::InitRegisterRules(CfaContext& context) const
++{
++	// The generic rules: "same value" for everything, the CFA for sp.
++	status_t error = Architecture::InitRegisterRules(context);
++	if (error != B_OK)
++		return error;
++
++	// The return address column is x30, not pc: leave the caller's pc
++	// undefined, so the unwinder takes it from the unwound x30
++	// (REGISTER_TYPE_RETURN_ADDRESS). "Same value" would make every caller
++	// look like the current frame.
++	context.RegisterRule(fToDwarfRegisterMap->MapRegisterIndex(
++		ARM64_REGISTER_PC))->SetToUndefined();
++	return B_OK;
++}
++
++
++status_t
++ArchitectureArm64::GetDwarfRegisterMaps(RegisterMap** _toDwarf,
++	RegisterMap** _fromDwarf) const
++{
++	if (_toDwarf != NULL) {
++		*_toDwarf = fToDwarfRegisterMap;
++		fToDwarfRegisterMap->AcquireReference();
++	}
++
++	if (_fromDwarf != NULL) {
++		*_fromDwarf = fFromDwarfRegisterMap;
++		fFromDwarfRegisterMap->AcquireReference();
++	}
++
++	return B_OK;
++}
++
++
++status_t
++ArchitectureArm64::GetCpuFeatures(uint32& flags)
++{
++	flags = 0;
++	return B_OK;
++}
++
++
++status_t
++ArchitectureArm64::CreateCpuState(CpuState*& _state)
++{
++	CpuStateArm64* state = new(std::nothrow) CpuStateArm64;
++	if (state == NULL)
++		return B_NO_MEMORY;
++
++	_state = state;
++	return B_OK;
++}
++
++
++status_t
++ArchitectureArm64::CreateCpuState(const void* cpuStateData, size_t size,
++	CpuState*& _state)
++{
++	if (size != sizeof(arm64_debug_cpu_state))
++		return B_BAD_VALUE;
++
++	CpuStateArm64* state = new(std::nothrow) CpuStateArm64(
++		*(const arm64_debug_cpu_state*)cpuStateData);
++	if (state == NULL)
++		return B_NO_MEMORY;
++
++	_state = state;
++	return B_OK;
++}
++
++
++/*!	Frame pointer based unwinding, for code without CFI. AAPCS64 frame
++	records are {previous x29, x30} with x29 pointing at them.
++*/
++status_t
++ArchitectureArm64::CreateStackFrame(Image* image, FunctionDebugInfo* function,
++	CpuState* _cpuState, bool isTopFrame, StackFrame*& _frame,
++	CpuState*& _previousCpuState)
++{
++	CpuStateArm64* cpuState = dynamic_cast<CpuStateArm64*>(_cpuState);
++	if (cpuState == NULL)
++		return B_BAD_VALUE;
++
++	uint64 framePointer = cpuState->IntRegisterValue(ARM64_REGISTER_FP);
++	uint64 pc = cpuState->IntRegisterValue(ARM64_REGISTER_PC);
++
++	bool readStandardFrame = true;
++	uint64 previousFramePointer = 0;
++	uint64 returnAddress = 0;
++
++	bool hasPrologue = _HasFunctionPrologue(function);
++	stack_frame_type frameType = hasPrologue
++		? STACK_FRAME_TYPE_STANDARD : STACK_FRAME_TYPE_FRAMELESS;
++
++	// In the top frame the return address may still be in lr: before the
++	// prologue has stored the frame record, in functions without one (leaf
++	// functions, the syscall stubs), or at an unreadable pc (a call through
++	// a bad function pointer).
++	if (isTopFrame && cpuState->IsRegisterSet(ARM64_REGISTER_LR)) {
++		uint8 data[4];
++		bool usesLinkRegister = !hasPrologue
++			|| pc < function->Address() + kFunctionPrologueSize
++			|| fTeamMemory->ReadMemory(pc, data, sizeof(data)) != 4;
++		if (usesLinkRegister) {
++			returnAddress = cpuState->IntRegisterValue(ARM64_REGISTER_LR);
++			previousFramePointer = framePointer;
++			framePointer = 0;
++			readStandardFrame = false;
++			frameType = STACK_FRAME_TYPE_FRAMELESS;
++		}
++	}
++
++	// create the stack frame
++	StackFrameDebugInfo* stackFrameDebugInfo
++		= new(std::nothrow) NoOpStackFrameDebugInfo;
++	if (stackFrameDebugInfo == NULL)
++		return B_NO_MEMORY;
++	BReference<StackFrameDebugInfo> stackFrameDebugInfoReference(
++		stackFrameDebugInfo, true);
++
++	StackFrame* frame = new(std::nothrow) StackFrame(frameType, cpuState,
++		framePointer, pc, stackFrameDebugInfo);
++	if (frame == NULL)
++		return B_NO_MEMORY;
++	BReference<StackFrame> frameReference(frame, true);
++
++	status_t error = frame->Init();
++	if (error != B_OK)
++		return error;
++
++	// read the frame record
++	if (readStandardFrame) {
++		uint64 frameData[2];
++		if (framePointer != 0 && (framePointer & 0xf) == 0
++			&& fTeamMemory->ReadMemory(framePointer, frameData, 16) == 16) {
++			previousFramePointer = frameData[0];
++			returnAddress = frameData[1];
++		}
++	}
++
++	// create the CPU state, if we have any info
++	CpuStateArm64* previousCpuState = NULL;
++	if (returnAddress != 0) {
++		previousCpuState = new(std::nothrow) CpuStateArm64;
++		if (previousCpuState == NULL)
++			return B_NO_MEMORY;
++
++		previousCpuState->SetIntRegister(ARM64_REGISTER_FP,
++			previousFramePointer);
++		previousCpuState->SetIntRegister(ARM64_REGISTER_PC, returnAddress);
++		frame->SetPreviousCpuState(previousCpuState);
++	}
++
++	frame->SetReturnAddress(returnAddress);
++
++	_frame = frameReference.Detach();
++	_previousCpuState = previousCpuState;
++	return B_OK;
++}
++
++
++void
++ArchitectureArm64::UpdateStackFrameCpuState(const StackFrame* frame,
++	Image* previousImage, FunctionDebugInfo* previousFunction,
++	CpuState* previousCpuState)
++{
++	// Not a top frame: the pc is a return address, point it at the call
++	// (the "bl" before it), so it maps to the calling statement.
++	CpuStateArm64* cpuState = dynamic_cast<CpuStateArm64*>(previousCpuState);
++	if (cpuState == NULL)
++		return;
++
++	uint64 pc = cpuState->IntRegisterValue(ARM64_REGISTER_PC);
++	if (previousFunction == NULL || pc <= previousFunction->Address())
++		return;
++
++	cpuState->SetIntRegister(ARM64_REGISTER_PC, pc - 4);
++}
++
++
++status_t
++ArchitectureArm64::ReadValueFromMemory(target_addr_t address, uint32 valueType,
++	BVariant& _value) const
++{
++	uint8 buffer[64];
++	size_t size = BVariant::SizeOfType(valueType);
++	if (size == 0 || size > sizeof(buffer))
++		return B_BAD_VALUE;
++
++	ssize_t bytesRead = fTeamMemory->ReadMemory(address, buffer, size);
++	if (bytesRead < 0)
++		return bytesRead;
++	if ((size_t)bytesRead != size)
++		return B_ERROR;
++
++	switch (valueType) {
++		case B_INT8_TYPE:
++			_value.SetTo(*(int8*)buffer);
++			return B_OK;
++		case B_UINT8_TYPE:
++			_value.SetTo(*(uint8*)buffer);
++			return B_OK;
++		case B_INT16_TYPE:
++			_value.SetTo(*(int16*)buffer);
++			return B_OK;
++		case B_UINT16_TYPE:
++			_value.SetTo(*(uint16*)buffer);
++			return B_OK;
++		case B_INT32_TYPE:
++			_value.SetTo(*(int32*)buffer);
++			return B_OK;
++		case B_UINT32_TYPE:
++			_value.SetTo(*(uint32*)buffer);
++			return B_OK;
++		case B_INT64_TYPE:
++			_value.SetTo(*(int64*)buffer);
++			return B_OK;
++		case B_UINT64_TYPE:
++			_value.SetTo(*(uint64*)buffer);
++			return B_OK;
++		case B_FLOAT_TYPE:
++			_value.SetTo(*(float*)buffer);
++			return B_OK;
++		case B_DOUBLE_TYPE:
++			_value.SetTo(*(double*)buffer);
++			return B_OK;
++		default:
++			return B_BAD_VALUE;
++	}
++}
++
++
++status_t
++ArchitectureArm64::ReadValueFromMemory(target_addr_t addressSpace,
++	target_addr_t address, uint32 valueType, BVariant& _value) const
++{
++	// n/a on this architecture
++	return B_BAD_VALUE;
++}
++
++
++status_t
++ArchitectureArm64::DisassembleCode(FunctionDebugInfo* function,
++	const void* buffer, size_t bufferSize, DisassembledCode*& _sourceCode)
++{
++	DisassembledCode* source = new(std::nothrow) DisassembledCode(
++		fAssemblyLanguage);
++	if (source == NULL)
++		return B_NO_MEMORY;
++	BReference<DisassembledCode> sourceReference(source, true);
++
++	DisassemblerArm64 disassembler;
++	status_t error = disassembler.Init(function->Address(), buffer, bufferSize);
++	if (error != B_OK)
++		return error;
++
++	BString functionName(function->PrettyName());
++	if (!source->AddCommentLine((functionName << ':').String()))
++		return B_NO_MEMORY;
++
++	BString line;
++	target_addr_t instructionAddress;
++	target_size_t instructionSize;
++	bool breakpointAllowed;
++	while (disassembler.GetNextInstruction(line, instructionAddress,
++				instructionSize, breakpointAllowed) == B_OK) {
++		if (!source->AddInstructionLine(line, instructionAddress,
++				instructionSize)) {
++			return B_NO_MEMORY;
++		}
++	}
++
++	_sourceCode = sourceReference.Detach();
++	return B_OK;
++}
++
++
++status_t
++ArchitectureArm64::GetStatement(FunctionDebugInfo* function,
++	target_addr_t address, Statement*& _statement)
++{
++	InstructionInfo info;
++	status_t error = GetInstructionInfo(address, info, NULL);
++	if (error != B_OK)
++		return error;
++
++	ContiguousStatement* statement = new(std::nothrow) ContiguousStatement(
++		SourceLocation(-1), TargetAddressRange(info.Address(), info.Size()));
++	if (statement == NULL)
++		return B_NO_MEMORY;
++
++	_statement = statement;
++	return B_OK;
++}
++
++
++status_t
++ArchitectureArm64::GetInstructionInfo(target_addr_t address,
++	InstructionInfo& _info, CpuState* state)
++{
++	uint8 buffer[4];
++	ssize_t bytesRead = fTeamMemory->ReadMemory(address, buffer,
++		sizeof(buffer));
++	if (bytesRead < 0)
++		return bytesRead;
++	if (bytesRead != (ssize_t)sizeof(buffer))
++		return B_BAD_ADDRESS;
++
++	DisassemblerArm64 disassembler;
++	status_t error = disassembler.Init(address, buffer, bytesRead);
++	if (error != B_OK)
++		return error;
++
++	return disassembler.GetNextInstructionInfo(_info, state);
++}
++
++
++/*!	Follows a PLT stub to the function it jumps to. The stubs GNU ld
++	writes for AArch64 are:
++		adrp	x16, <GOT page>
++		ldr		x17, [x16, #<slot offset>]
++		add		x16, x16, #<slot offset>
++		br		x17
++*/
++status_t
++ArchitectureArm64::ResolvePICFunctionAddress(target_addr_t instructionAddress,
++	CpuState* state, target_addr_t& _targetAddress)
++{
++	// instructionAddress is the PLT stub the call went to
++	target_addr_t stub = instructionAddress;
++	uint32 code[2];
++	if (fTeamMemory->ReadMemory(stub, code, sizeof(code)) != sizeof(code))
++		return B_BAD_VALUE;
++
++	// adrp x16, imm
++	if ((code[0] & 0x9f00001f) != 0x90000010)
++		return B_BAD_VALUE;
++	uint64 immediate = ((code[0] >> 29) & 0x3) | (((code[0] >> 5) & 0x7ffff) << 2);
++	int64 pageOffset = (int64)(immediate << 43) >> 31;
++		// sign extend the 21 bit page number and multiply by 4096
++	target_addr_t page = (stub & ~(target_addr_t)0xfff) + pageOffset;
++
++	// ldr x17, [x16, #imm12 * 8]
++	if ((code[1] & 0xffc003ff) != 0xf9400211)
++		return B_BAD_VALUE;
++	target_addr_t slot = page + ((code[1] >> 10) & 0xfff) * 8;
++
++	target_addr_t target;
++	if (fTeamMemory->ReadMemory(slot, &target, sizeof(target))
++			!= sizeof(target)) {
++		return B_BAD_VALUE;
++	}
++
++	_targetAddress = target;
++	return B_OK;
++}
++
++
++status_t
++ArchitectureArm64::GetWatchpointDebugCapabilities(int32& _maxRegisterCount,
++	int32& _maxBytesPerRegister, uint8& _watchpointCapabilityFlags)
++{
++	// the kernel does not program the hardware watchpoints (yet)
++	_maxRegisterCount = 0;
++	_maxBytesPerRegister = 0;
++	_watchpointCapabilityFlags = 0;
++	return B_OK;
++}
++
++
++status_t
++ArchitectureArm64::GetReturnAddressLocation(StackFrame* frame,
++	target_size_t valueSize, ValueLocation*& _location)
++{
++	// AAPCS64: values up to 16 bytes come back in x0 (and x1); larger ones
++	// are written to memory at x8, which is not preserved past the return.
++	if (valueSize > 16)
++		return B_UNSUPPORTED;
++
++	ValueLocation* location = new(std::nothrow) ValueLocation(IsBigEndian());
++	if (location == NULL)
++		return B_NO_MEMORY;
++	BReference<ValueLocation> locationReference(location, true);
++
++	ValuePieceLocation piece;
++	piece.SetSize(valueSize > 8 ? 8 : valueSize);
++	piece.SetToRegister(ARM64_REGISTER_X0);
++	if (!location->AddPiece(piece))
++		return B_NO_MEMORY;
++
++	if (valueSize > 8) {
++		ValuePieceLocation highPiece;
++		highPiece.SetSize(valueSize - 8);
++		highPiece.SetToRegister(ARM64_REGISTER_X0 + 1);
++		if (!location->AddPiece(highPiece))
++			return B_NO_MEMORY;
++	}
++
++	_location = locationReference.Detach();
++	return B_OK;
++}
++
++
++void
++ArchitectureArm64::_AddRegister(int32 index, const char* name,
++	uint32 bitSize, uint32 valueType, register_type type, bool calleePreserved)
++{
++	if (!fRegisters.Add(Register(index, name, bitSize, valueType, type,
++			calleePreserved))) {
++		throw std::bad_alloc();
++	}
++}
++
++
++void
++ArchitectureArm64::_AddIntegerRegister(int32 index, const char* name,
++	uint32 valueType, register_type type, bool calleePreserved)
++{
++	_AddRegister(index, name, 8 * BVariant::SizeOfType(valueType), valueType,
++		type, calleePreserved);
++}
++
++
++void
++ArchitectureArm64::_AddSIMDRegister(int32 index, const char* name,
++	bool calleePreserved)
++{
++	_AddRegister(index, name, 128, B_RAW_TYPE, REGISTER_TYPE_GENERAL_PURPOSE,
++		calleePreserved);
++}
++
++
++bool
++ArchitectureArm64::_HasFunctionPrologue(FunctionDebugInfo* function) const
++{
++	if (function == NULL || function->Size() < kFunctionPrologueSize)
++		return false;
++
++	uint32 code[2];
++	if (fTeamMemory->ReadMemory(function->Address(), code, sizeof(code))
++			!= sizeof(code)) {
++		return false;
++	}
++
++	// stp x29, x30, [sp, #-N]!  then  mov x29, sp
++	return (code[0] & 0xffc07fff) == 0xa9807bfd && code[1] == 0x910003fd;
++}
+diff --git a/src/kits/debugger/arch/arm64/ArchitectureArm64.h b/src/kits/debugger/arch/arm64/ArchitectureArm64.h
+new file mode 100644
+index 00000000..7025ffb3
+--- /dev/null
++++ b/src/kits/debugger/arch/arm64/ArchitectureArm64.h
+@@ -0,0 +1,103 @@
++/*
++ * Copyright 2026, Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef ARCHITECTURE_ARM64_H
++#define ARCHITECTURE_ARM64_H
++
++
++#include <Array.h>
++
++#include "Architecture.h"
++#include "Register.h"
++
++
++class SourceLanguage;
++
++
++class ArchitectureArm64 : public Architecture {
++public:
++								ArchitectureArm64(TeamMemory* teamMemory);
++	virtual						~ArchitectureArm64();
++
++	virtual	status_t			Init();
++
++	virtual int32				StackGrowthDirection() const;
++
++	virtual	int32				CountRegisters() const;
++	virtual	const Register*		Registers() const;
++	virtual	status_t			InitRegisterRules(CfaContext& context) const;
++
++	virtual	status_t			GetDwarfRegisterMaps(RegisterMap** _toDwarf,
++									RegisterMap** _fromDwarf) const;
++
++	virtual	status_t			GetCpuFeatures(uint32& flags);
++
++	virtual	status_t			CreateCpuState(CpuState*& _state);
++	virtual	status_t			CreateCpuState(const void* cpuStateData,
++									size_t size, CpuState*& _state);
++	virtual	status_t			CreateStackFrame(Image* image,
++									FunctionDebugInfo* function,
++									CpuState* cpuState, bool isTopFrame,
++									StackFrame*& _frame,
++									CpuState*& _previousCpuState);
++	virtual	void				UpdateStackFrameCpuState(
++									const StackFrame* frame,
++									Image* previousImage,
++									FunctionDebugInfo* previousFunction,
++									CpuState* previousCpuState);
++
++	virtual	status_t			ReadValueFromMemory(target_addr_t address,
++									uint32 valueType, BVariant& _value) const;
++	virtual	status_t			ReadValueFromMemory(target_addr_t addressSpace,
++									target_addr_t address, uint32 valueType,
++									BVariant& _value) const;
++
++	virtual	status_t			DisassembleCode(FunctionDebugInfo* function,
++									const void* buffer, size_t bufferSize,
++									DisassembledCode*& _sourceCode);
++	virtual	status_t			GetStatement(FunctionDebugInfo* function,
++									target_addr_t address,
++									Statement*& _statement);
++	virtual	status_t			GetInstructionInfo(target_addr_t address,
++									InstructionInfo& _info, CpuState* state);
++	virtual	status_t			ResolvePICFunctionAddress(target_addr_t
++									instructionAddress,
++									CpuState* state,
++									target_addr_t& _targetAddress);
++
++	virtual	status_t			GetWatchpointDebugCapabilities(
++									int32& _maxRegisterCount,
++									int32& _maxBytesPerRegister,
++									uint8& _watchpointCapabilityFlags);
++
++	virtual	status_t			GetReturnAddressLocation(
++									StackFrame* frame, target_size_t valueSize,
++									ValueLocation*& _location);
++
++private:
++			struct ToDwarfRegisterMap;
++			struct FromDwarfRegisterMap;
++
++private:
++			void				_AddRegister(int32 index, const char* name,
++									uint32 bitSize, uint32 valueType,
++									register_type type, bool calleePreserved);
++			void				_AddIntegerRegister(int32 index,
++									const char* name, uint32 valueType,
++									register_type type, bool calleePreserved);
++			void				_AddSIMDRegister(int32 index,
++									const char* name, bool calleePreserved);
++
++			bool				_HasFunctionPrologue(
++									FunctionDebugInfo* function) const;
++
++private:
++			Array<Register>		fRegisters;
++			SourceLanguage*		fAssemblyLanguage;
++			ToDwarfRegisterMap*	fToDwarfRegisterMap;
++			FromDwarfRegisterMap* fFromDwarfRegisterMap;
++};
++
++
++#endif	// ARCHITECTURE_ARM64_H
+diff --git a/src/kits/debugger/arch/arm64/Arm64AssemblyLanguage.h b/src/kits/debugger/arch/arm64/Arm64AssemblyLanguage.h
+new file mode 100644
+index 00000000..ff0e8f24
+--- /dev/null
++++ b/src/kits/debugger/arch/arm64/Arm64AssemblyLanguage.h
+@@ -0,0 +1,18 @@
++/*
++ * Copyright 2026, Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef ARM64_ASSEMBLY_LANGUAGE_H
++#define ARM64_ASSEMBLY_LANGUAGE_H
++
++
++#include "SourceLanguage.h"
++
++
++class Arm64AssemblyLanguage : public SourceLanguage {
++public:
++	virtual	const char*			Name() const	{ return "ARM64 assembly"; }
++};
++
++
++#endif	// ARM64_ASSEMBLY_LANGUAGE_H
+diff --git a/src/kits/debugger/arch/arm64/CpuStateArm64.cpp b/src/kits/debugger/arch/arm64/CpuStateArm64.cpp
+new file mode 100644
+index 00000000..f55e8e3d
+--- /dev/null
++++ b/src/kits/debugger/arch/arm64/CpuStateArm64.cpp
+@@ -0,0 +1,211 @@
++/*
++ * Copyright 2026, Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "CpuStateArm64.h"
++
++#include <new>
++
++#include <string.h>
++
++#include "Register.h"
++
++
++CpuStateArm64::CpuStateArm64()
++	:
++	fSetRegisters()
++{
++	memset(fIntRegisters, 0, sizeof(fIntRegisters));
++	memset(fSIMDRegisters, 0, sizeof(fSIMDRegisters));
++}
++
++
++CpuStateArm64::CpuStateArm64(const arm64_debug_cpu_state& state)
++	:
++	fSetRegisters()
++{
++	memset(fIntRegisters, 0, sizeof(fIntRegisters));
++	memset(fSIMDRegisters, 0, sizeof(fSIMDRegisters));
++
++	for (int32 i = 0; i < 30; i++)
++		SetIntRegister(ARM64_REGISTER_X0 + i, state.x[i]);
++	SetIntRegister(ARM64_REGISTER_LR, state.lr);
++	SetIntRegister(ARM64_REGISTER_SP, state.sp);
++	SetIntRegister(ARM64_REGISTER_PC, state.elr);
++	SetIntRegister(ARM64_REGISTER_CPSR, state.spsr);
++	SetIntRegister(ARM64_REGISTER_FPSR, state.fpsr);
++	SetIntRegister(ARM64_REGISTER_FPCR, state.fpcr);
++
++	for (int32 i = 0; i < 32; i++)
++		_SetSIMDRegister(ARM64_REGISTER_V0 + i, (const uint64*)&state.fp_q[i * 2]);
++}
++
++
++CpuStateArm64::~CpuStateArm64()
++{
++}
++
++
++status_t
++CpuStateArm64::Clone(CpuState*& _clone) const
++{
++	CpuStateArm64* newState = new(std::nothrow) CpuStateArm64();
++	if (newState == NULL)
++		return B_NO_MEMORY;
++
++	memcpy(newState->fIntRegisters, fIntRegisters, sizeof(fIntRegisters));
++	memcpy(newState->fSIMDRegisters, fSIMDRegisters, sizeof(fSIMDRegisters));
++	newState->fSetRegisters = fSetRegisters;
++
++	_clone = newState;
++	return B_OK;
++}
++
++
++status_t
++CpuStateArm64::UpdateDebugState(void* state, size_t size) const
++{
++	if (size != sizeof(arm64_debug_cpu_state))
++		return B_BAD_VALUE;
++
++	arm64_debug_cpu_state* armState = (arm64_debug_cpu_state*)state;
++
++	for (int32 i = 0; i < 30; i++)
++		armState->x[i] = IntRegisterValue(ARM64_REGISTER_X0 + i);
++	armState->lr = IntRegisterValue(ARM64_REGISTER_LR);
++	armState->sp = IntRegisterValue(ARM64_REGISTER_SP);
++	armState->elr = IntRegisterValue(ARM64_REGISTER_PC);
++	armState->spsr = IntRegisterValue(ARM64_REGISTER_CPSR);
++	armState->fpsr = IntRegisterValue(ARM64_REGISTER_FPSR);
++	armState->fpcr = IntRegisterValue(ARM64_REGISTER_FPCR);
++
++	for (int32 i = 0; i < 32; i++) {
++		if (IsRegisterSet(ARM64_REGISTER_V0 + i)) {
++			memcpy(&armState->fp_q[i * 2], fSIMDRegisters[i].value,
++				sizeof(arm64_simd_register));
++		} else
++			memset(&armState->fp_q[i * 2], 0, sizeof(arm64_simd_register));
++	}
++
++	return B_OK;
++}
++
++
++target_addr_t
++CpuStateArm64::InstructionPointer() const
++{
++	return IsRegisterSet(ARM64_REGISTER_PC)
++		? IntRegisterValue(ARM64_REGISTER_PC) : 0;
++}
++
++
++void
++CpuStateArm64::SetInstructionPointer(target_addr_t address)
++{
++	SetIntRegister(ARM64_REGISTER_PC, address);
++}
++
++
++target_addr_t
++CpuStateArm64::StackFramePointer() const
++{
++	return IsRegisterSet(ARM64_REGISTER_FP)
++		? IntRegisterValue(ARM64_REGISTER_FP) : 0;
++}
++
++
++target_addr_t
++CpuStateArm64::StackPointer() const
++{
++	return IsRegisterSet(ARM64_REGISTER_SP)
++		? IntRegisterValue(ARM64_REGISTER_SP) : 0;
++}
++
++
++bool
++CpuStateArm64::GetRegisterValue(const Register* reg, BVariant& _value) const
++{
++	int32 index = reg->Index();
++	if (!IsRegisterSet(index))
++		return false;
++
++	if (index < ARM64_INT_REGISTER_END) {
++		if (reg->BitSize() == 32)
++			_value.SetTo((uint32)fIntRegisters[index]);
++		else
++			_value.SetTo(fIntRegisters[index]);
++		return true;
++	}
++
++	if (index < ARM64_SIMD_REGISTER_END) {
++		_value.SetTo(fSIMDRegisters[index - ARM64_REGISTER_V0].value);
++		return true;
++	}
++
++	return false;
++}
++
++
++bool
++CpuStateArm64::SetRegisterValue(const Register* reg, const BVariant& value)
++{
++	int32 index = reg->Index();
++	if (index < 0)
++		return false;
++
++	if (index < ARM64_INT_REGISTER_END) {
++		fIntRegisters[index] = value.ToUInt64();
++	} else if (index < ARM64_SIMD_REGISTER_END) {
++		if (value.Size() > sizeof(arm64_simd_register))
++			return false;
++		arm64_simd_register& simd = fSIMDRegisters[index - ARM64_REGISTER_V0];
++		memset(&simd, 0, sizeof(simd));
++		memcpy(simd.value, value.ToPointer(), value.Size());
++	} else
++		return false;
++
++	fSetRegisters[index] = 1;
++	return true;
++}
++
++
++bool
++CpuStateArm64::IsRegisterSet(int32 index) const
++{
++	return index >= 0 && index < ARM64_REGISTER_COUNT && fSetRegisters[index];
++}
++
++
++uint64
++CpuStateArm64::IntRegisterValue(int32 index) const
++{
++	if (!IsRegisterSet(index) || index >= ARM64_INT_REGISTER_END)
++		return 0;
++
++	return fIntRegisters[index];
++}
++
++
++void
++CpuStateArm64::SetIntRegister(int32 index, uint64 value)
++{
++	if (index < 0 || index >= ARM64_INT_REGISTER_END)
++		return;
++
++	fIntRegisters[index] = value;
++	fSetRegisters[index] = 1;
++}
++
++
++void
++CpuStateArm64::_SetSIMDRegister(int32 index, const uint64* value)
++{
++	if (index < ARM64_REGISTER_V0 || index >= ARM64_SIMD_REGISTER_END)
++		return;
++
++	memcpy(fSIMDRegisters[index - ARM64_REGISTER_V0].value, value,
++		sizeof(arm64_simd_register));
++	fSetRegisters[index] = 1;
++}
+diff --git a/src/kits/debugger/arch/arm64/CpuStateArm64.h b/src/kits/debugger/arch/arm64/CpuStateArm64.h
+new file mode 100644
+index 00000000..20f8903e
+--- /dev/null
++++ b/src/kits/debugger/arch/arm64/CpuStateArm64.h
+@@ -0,0 +1,88 @@
++/*
++ * Copyright 2026, Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef CPU_STATE_ARM64_H
++#define CPU_STATE_ARM64_H
++
++#include <bitset>
++
++#include <debugger.h>
++
++#include "CpuState.h"
++
++
++enum {
++	ARM64_REGISTER_X0 = 0,
++	// x1 - x28 follow
++	ARM64_REGISTER_FP = 29,		// x29
++	ARM64_REGISTER_LR = 30,		// x30
++	ARM64_REGISTER_SP = 31,
++	ARM64_REGISTER_PC,
++	ARM64_REGISTER_CPSR,
++	ARM64_REGISTER_FPSR,
++	ARM64_REGISTER_FPCR,
++
++	ARM64_INT_REGISTER_END,
++
++	ARM64_REGISTER_V0 = ARM64_INT_REGISTER_END,
++	// v1 - v31 follow
++
++	ARM64_SIMD_REGISTER_END = ARM64_REGISTER_V0 + 32,
++
++	ARM64_REGISTER_COUNT = ARM64_SIMD_REGISTER_END
++};
++
++
++#define ARM64_INT_REGISTER_COUNT ARM64_INT_REGISTER_END
++#define ARM64_SIMD_REGISTER_COUNT (ARM64_SIMD_REGISTER_END \
++	- ARM64_INT_REGISTER_END)
++
++
++struct arm64_simd_register {
++	uint64	value[2];	// low, high
++};
++
++
++class CpuStateArm64 : public CpuState {
++public:
++								CpuStateArm64();
++								CpuStateArm64(
++									const arm64_debug_cpu_state& state);
++	virtual						~CpuStateArm64();
++
++	virtual	status_t			Clone(CpuState*& _clone) const;
++
++	virtual	status_t			UpdateDebugState(void* state, size_t size)
++									const;
++
++	virtual	target_addr_t		InstructionPointer() const;
++	virtual	void				SetInstructionPointer(target_addr_t address);
++
++	virtual	target_addr_t		StackFramePointer() const;
++	virtual	target_addr_t		StackPointer() const;
++	virtual	bool				GetRegisterValue(const Register* reg,
++									BVariant& _value) const;
++	virtual	bool				SetRegisterValue(const Register* reg,
++									const BVariant& value);
++
++			bool				IsRegisterSet(int32 index) const;
++
++			uint64				IntRegisterValue(int32 index) const;
++			void				SetIntRegister(int32 index, uint64 value);
++
++private:
++			void				_SetSIMDRegister(int32 index,
++									const uint64* value);
++
++private:
++	typedef std::bitset<ARM64_REGISTER_COUNT> RegisterBitSet;
++
++private:
++			uint64				fIntRegisters[ARM64_INT_REGISTER_COUNT];
++			arm64_simd_register	fSIMDRegisters[ARM64_SIMD_REGISTER_COUNT];
++			RegisterBitSet		fSetRegisters;
++};
++
++
++#endif	// CPU_STATE_ARM64_H
+diff --git a/src/kits/debugger/arch/arm64/disasm/DisassemblerArm64.cpp b/src/kits/debugger/arch/arm64/disasm/DisassemblerArm64.cpp
+new file mode 100644
+index 00000000..5a8c536b
+--- /dev/null
++++ b/src/kits/debugger/arch/arm64/disasm/DisassemblerArm64.cpp
+@@ -0,0 +1,224 @@
++/*
++ * Copyright 2026, Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++#include "DisassemblerArm64.h"
++
++#include <new>
++
++#include <stdio.h>
++#include <string.h>
++
++#include <capstone/capstone.h>
++
++#include "CpuStateArm64.h"
++#include "InstructionInfo.h"
++
++
++// All AArch64 instructions are 4 bytes, little endian.
++static const size_t kInstructionSize = 4;
++
++
++static inline int64
++sign_extend(uint64 value, int bits)
++{
++	uint64 sign = 1ULL << (bits - 1);
++	return (int64)((value ^ sign) - sign);
++}
++
++
++static inline uint32
++read_instruction(const uint8* code)
++{
++	return code[0] | (code[1] << 8) | (code[2] << 16) | ((uint32)code[3] << 24);
++}
++
++
++DisassemblerArm64::DisassemblerArm64()
++	:
++	fAddress(0),
++	fCode(NULL),
++	fCodeSize(0),
++	fOffset(0),
++	fHandle(0)
++{
++}
++
++
++DisassemblerArm64::~DisassemblerArm64()
++{
++	if (fHandle != 0) {
++		csh handle = fHandle;
++		cs_close(&handle);
++	}
++}
++
++
++status_t
++DisassemblerArm64::Init(target_addr_t address, const void* code,
++	size_t codeSize)
++{
++	fAddress = address;
++	fCode = (const uint8*)code;
++	fCodeSize = codeSize;
++	fOffset = 0;
++
++	if (fHandle == 0) {
++		csh handle;
++		if (cs_open(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, &handle) != CS_ERR_OK)
++			return B_ERROR;
++		fHandle = handle;
++	}
++
++	return B_OK;
++}
++
++
++status_t
++DisassemblerArm64::GetNextInstruction(BString& line, target_addr_t& _address,
++	target_size_t& _size, bool& _breakpointAllowed)
++{
++	if (fOffset + kInstructionSize > fCodeSize)
++		return B_ENTRY_NOT_FOUND;
++
++	target_addr_t address = fAddress + fOffset;
++	uint32 instruction = read_instruction(fCode + fOffset);
++	fOffset += kInstructionSize;
++
++	status_t error = _Format(address, instruction, line);
++	if (error != B_OK)
++		return error;
++
++	_address = address;
++	_size = kInstructionSize;
++	_breakpointAllowed = true;
++	return B_OK;
++}
++
++
++status_t
++DisassemblerArm64::GetPreviousInstruction(target_addr_t nextAddress,
++	target_addr_t& _address, target_size_t& _size)
++{
++	if (nextAddress < fAddress + kInstructionSize
++		|| nextAddress > fAddress + fCodeSize) {
++		return B_BAD_VALUE;
++	}
++
++	_address = nextAddress - kInstructionSize;
++	_size = kInstructionSize;
++	return B_OK;
++}
++
++
++status_t
++DisassemblerArm64::GetNextInstructionInfo(InstructionInfo& _info,
++	CpuState* state)
++{
++	if (fOffset + kInstructionSize > fCodeSize)
++		return B_ENTRY_NOT_FOUND;
++
++	target_addr_t address = fAddress + fOffset;
++	uint32 instruction = read_instruction(fCode + fOffset);
++	fOffset += kInstructionSize;
++
++	int type = INSTRUCTION_TYPE_OTHER;
++	target_addr_t targetAddress = 0;
++	DecodeBranch(instruction, address, state, type, targetAddress);
++
++	BString line;
++	status_t error = _Format(address, instruction, line);
++	if (error != B_OK)
++		return error;
++
++	if (!_info.SetTo(address, targetAddress, kInstructionSize,
++			(instruction_type)type, true, line)) {
++		return B_NO_MEMORY;
++	}
++
++	return B_OK;
++}
++
++
++/*!	Classifies calls and jumps, and computes their target where possible
++	(for register targets only with a CPU state). Returns whether
++	\a instruction is a branch at all.
++*/
++/*static*/ bool
++DisassemblerArm64::DecodeBranch(uint32 instruction, target_addr_t address,
++	CpuState* state, int& _type, target_addr_t& _target)
++{
++	CpuStateArm64* armState = dynamic_cast<CpuStateArm64*>(state);
++	uint32 rn = (instruction >> 5) & 0x1f;
++
++	_type = INSTRUCTION_TYPE_OTHER;
++	_target = 0;
++
++	if ((instruction & 0x7c000000) == 0x14000000) {
++		// B, BL imm26
++		_type = (instruction & 0x80000000) != 0
++			? INSTRUCTION_TYPE_SUBROUTINE_CALL : INSTRUCTION_TYPE_JUMP;
++		_target = address + sign_extend(instruction & 0x03ffffff, 26) * 4;
++		return true;
++	}
++
++	if ((instruction & 0xff000010) == 0x54000000
++		|| (instruction & 0x7e000000) == 0x34000000) {
++		// B.cond, CBZ, CBNZ imm19
++		_type = INSTRUCTION_TYPE_JUMP;
++		_target = address + sign_extend((instruction >> 5) & 0x7ffff, 19) * 4;
++		return true;
++	}
++
++	if ((instruction & 0x7e000000) == 0x36000000) {
++		// TBZ, TBNZ imm14
++		_type = INSTRUCTION_TYPE_JUMP;
++		_target = address + sign_extend((instruction >> 5) & 0x3fff, 14) * 4;
++		return true;
++	}
++
++	// unconditional branch (register): BR, BLR, RET and their pointer
++	// authenticating variants
++	if ((instruction & 0xfe000000) == 0xd6000000) {
++		uint32 opc = (instruction >> 21) & 0xf;
++		if (opc == 1)
++			_type = INSTRUCTION_TYPE_SUBROUTINE_CALL;
++		else if (opc == 0 || opc == 2)
++			_type = INSTRUCTION_TYPE_JUMP;
++		else
++			return false;
++
++		if (armState != NULL && rn != 31)
++			_target = armState->IntRegisterValue(ARM64_REGISTER_X0 + rn);
++		return true;
++	}
++
++	return false;
++}
++
++
++status_t
++DisassemblerArm64::_Format(target_addr_t address, uint32 instruction,
++	BString& line)
++{
++	uint8 code[4];
++	memcpy(code, &instruction, sizeof(code));
++		// AArch64 hosts are little endian, as is the code
++
++	cs_insn* insn = NULL;
++	size_t count = cs_disasm((csh)fHandle, code, sizeof(code), address, 1,
++		&insn);
++	if (count == 1) {
++		line.SetToFormat("0x%016" B_PRIx64 ": %08" B_PRIx32 "  %s\t%s",
++			address, instruction, insn->mnemonic, insn->op_str);
++	} else {
++		line.SetToFormat("0x%016" B_PRIx64 ": %08" B_PRIx32 "  .inst\t0x%08"
++			B_PRIx32, address, instruction, instruction);
++	}
++
++	if (insn != NULL)
++		cs_free(insn, count);
++
++	return line.Length() > 0 ? B_OK : B_NO_MEMORY;
++}
+diff --git a/src/kits/debugger/arch/arm64/disasm/DisassemblerArm64.h b/src/kits/debugger/arch/arm64/disasm/DisassemblerArm64.h
+new file mode 100644
+index 00000000..afcfd2ab
+--- /dev/null
++++ b/src/kits/debugger/arch/arm64/disasm/DisassemblerArm64.h
+@@ -0,0 +1,55 @@
++/*
++ * Copyright 2026, Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef DISASSEMBLER_ARM64_H
++#define DISASSEMBLER_ARM64_H
++
++#include <String.h>
++
++#include "Types.h"
++
++
++class CpuState;
++class InstructionInfo;
++
++
++class DisassemblerArm64 {
++public:
++								DisassemblerArm64();
++								~DisassemblerArm64();
++
++			status_t			Init(target_addr_t address, const void* code,
++									size_t codeSize);
++
++			status_t			GetNextInstruction(BString& line,
++									target_addr_t& _address,
++									target_size_t& _size,
++									bool& _breakpointAllowed);
++			status_t			GetPreviousInstruction(
++									target_addr_t nextAddress,
++									target_addr_t& _address,
++									target_size_t& _size);
++			status_t			GetNextInstructionInfo(
++									InstructionInfo& _info,
++									CpuState* state);
++
++	static	bool				DecodeBranch(uint32 instruction,
++									target_addr_t address, CpuState* state,
++									int& _type, target_addr_t& _target);
++									// _type is an instruction_type
++
++private:
++			status_t			_Format(target_addr_t address,
++									uint32 instruction, BString& line);
++
++private:
++			target_addr_t		fAddress;
++			const uint8*		fCode;
++			size_t				fCodeSize;
++			size_t				fOffset;
++			size_t				fHandle;
++};
++
++
++#endif	// DISASSEMBLER_ARM64_H
+diff --git a/src/kits/debugger/arch/arm64/disasm/Jamfile b/src/kits/debugger/arch/arm64/disasm/Jamfile
+new file mode 100644
+index 00000000..79ad92dc
+--- /dev/null
++++ b/src/kits/debugger/arch/arm64/disasm/Jamfile
+@@ -0,0 +1,19 @@
++SubDir HAIKU_TOP src kits debugger arch arm64 disasm ;
++
++UsePrivateHeaders shared ;
++
++UsePrivateHeaders [ FDirName debugger arch ] ;
++UsePrivateHeaders [ FDirName debugger types ] ;
++
++# Capstone's AArch64 disassembler, built by the bootstrap's
++# scripts/container/build-capstone.sh
++HAIKU_CAPSTONE_DIR ?= /build/deps/capstone-arm64 ;
++SubDirSysHdrs [ FDirName $(HAIKU_CAPSTONE_DIR) include ] ;
++
++SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) ] ;
++SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) $(DOTDOT) ] ;
++
++MergeObject Debugger_disasm_arm64.o
++	:
++	DisassemblerArm64.cpp
++;
+diff --git a/src/kits/debugger/debug_info/DwarfImageDebugInfo.cpp b/src/kits/debugger/debug_info/DwarfImageDebugInfo.cpp
+index 5d56f322..d8dd0d77 100644
+--- a/src/kits/debugger/debug_info/DwarfImageDebugInfo.cpp
++++ b/src/kits/debugger/debug_info/DwarfImageDebugInfo.cpp
+@@ -657,6 +657,20 @@ DwarfImageDebugInfo::CreateFrame(Image* image,
+ 		return B_UNSUPPORTED;
+ 	}
+ 
++	// On CPUs with a link register (arm64), the return address column is
++	// not the instruction pointer: the caller continues at the unwound value
++	// of the return address register.
++	if (previousCpuState->InstructionPointer() == 0) {
++		for (int32 i = 0; i < registerCount; i++) {
++			if (registers[i].Type() != REGISTER_TYPE_RETURN_ADDRESS)
++				continue;
++			BVariant value;
++			if (previousCpuState->GetRegisterValue(registers + i, value))
++				previousCpuState->SetInstructionPointer(value.ToUInt64());
++			break;
++		}
++	}
++
+ 	TRACE_CFI_ONLY(
+ 		TRACE_CFI("unwound registers:\n");
+ 		for (int32 i = 0; i < registerCount; i++) {
+diff --git a/src/kits/debugger/debugger_interface/local/LocalDebuggerInterface.cpp b/src/kits/debugger/debugger_interface/local/LocalDebuggerInterface.cpp
+index 4f31df0c..d2410d2e 100644
+--- a/src/kits/debugger/debugger_interface/local/LocalDebuggerInterface.cpp
++++ b/src/kits/debugger/debugger_interface/local/LocalDebuggerInterface.cpp
+@@ -23,6 +23,9 @@
+ 
+ #include "ArchitectureX86.h"
+ #include "ArchitectureX8664.h"
++#ifdef ARCH_arm64
++#	include "ArchitectureArm64.h"
++#endif
+ #include "AreaInfo.h"
+ #include "AutoDeleter.h"
+ #include "CpuState.h"
+@@ -266,6 +269,8 @@ LocalDebuggerInterface::Init()
+ 	fArchitecture = new(std::nothrow) ArchitectureX86(this);
+ #elif defined(ARCH_x86_64)
+ 	fArchitecture = new(std::nothrow) ArchitectureX8664(this);
++#elif defined(ARCH_arm64)
++	fArchitecture = new(std::nothrow) ArchitectureArm64(this);
+ #else
+ 	return B_UNSUPPORTED;
+ #endif
+-- 
+2.39.5
+

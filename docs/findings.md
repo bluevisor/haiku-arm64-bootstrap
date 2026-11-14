@@ -201,10 +201,79 @@ Resets and never-connected sockets behave as before. To try a kernel add-on
 without repacking `haiku`, put it under `/boot/system/non-packaged/add-ons/kernel/…`:
 the module loader searches non-packaged before the system add-ons.
 
-**Clock starts at 1970 every boot.** There's no driver for QEMU's PL031 RTC.
+**Clock starts at 1970 every boot.** Stock arm64 has no driver for QEMU's PL031 RTC.
 Symptom: `SSL certificate OpenSSL verify result: certificate is not yet valid (9)`.
-→ `/boot/system/preferences/Time --update` does a headless NTP sync and exits 0.
-Run it at boot (`scripts/guest/UserBootscript.snippet`).
+→ Patch 0020 reads it in `arch_real_time_clock.cpp`. QEMU virt's ACPI tables
+don't describe the PL031, so the kernel recognizes the machine by the PL011 at
+0x09000000 the loader found, maps 0x09010000 and checks the PrimeCell IDs
+before trusting it. QEMU's RTC runs in UTC: set `RTC_time_settings` to `gmt`.
+Gotcha that hid it for a day: the loader hands the kernel the UART's *virtual*
+address in `arch_args.uart.regs.start` (it maps the UART for early output), so
+comparing that with 0x09000000 always failed and the driver silently did
+nothing; the NTP sync at boot made the clock look right. The kernel now looks
+up the physical address with `QueryInterrupt` on the kernel translation map.
+Second gotcha, once it did run (revision 8): QEMU quit with `Assertion failed:
+(isv), function hvf_vcpu_exec, file hvf.c` on every boot. The compiler had
+turned the PrimeCell ID loop into a post-indexed `ldr w1, [x4], #4`; a fault
+on a load/store with writeback carries no instruction syndrome (ISV=0), and
+QEMU's HVF backend can't emulate it, so the whole VM dies. MMIO now goes
+through `asm volatile("ldr %w0, [%1]")` / `str`. Check new MMIO code with
+`objdump -d` for `], #` or `]!` on device accesses before booting it.
+Check: `grep -a "arm64 rtc" /var/log/syslog` shows `PL031 at 0x9010000, time …`
+on every boot (kernel dprintfs from this stage do reach syslog). Without the
+patch: `/boot/system/preferences/Time --update` does a headless NTP sync and
+exits 0; run it at boot (`scripts/guest/UserBootscript.snippet`). Its retry
+loop can give up if the network is slow (seen once after a force stop).
+
+**User debugging on arm64 (patches 0022–0024).** Stock arm64 had no
+`arch_user_debugger`: any `brk` or undefined instruction in an app panicked
+the kernel. What it took:
+- Single step needs MDSCR_EL1.SS *and* PSTATE.SS (SPSR bit 21), and the OS
+  lock (OSLAR_EL1) released, or step exceptions never arrive.
+- There's no resume flag, so the BreakpointManager can't swap a software
+  breakpoint for a hardware one to continue: it writes the original
+  instruction back, single-steps it and reinstalls the `brk`
+  (`DEBUG_SOFTWARE_BREAKPOINT_STEP_OVER`). Writing code also needs an
+  I-cache sync; the stock `CTR_EL0` line-size decode was wrong too.
+- Debugger: the architecture's register list must be in register-index
+  order, because the generic DWARF code indexes it by `Register::Index()`.
+  The CFI rule for pc has to start "undefined": the return address is x30, so
+  "same value" makes every caller look like the current frame, and the stack
+  trace never ends (the worker allocates until the VM crawls).
+- Upstream bug, any arch: the CLI's `bt` waited for the stack trace while
+  holding the team lock its job needs (0024).
+- Test tools that use `<debugger.h>` must be rebuilt after the headers
+  change: a stale one got "Bad address" from `B_DEBUG_MESSAGE_SET_BREAKPOINT`.
+
+**Appearance color themes (patch 0025).** A theme is a window tab color, an
+accent and a background hue, laid over the built-in light or dark set; the
+selected one is recognized from the current colors, so nothing new is stored.
+- A `BGroupLayout`/`BGridLayout` filled with `AddView()` before it has an
+  owner view, then added to a builder grid, never made those views children:
+  they had no frame and didn't draw. Use `BGroupView`/`BGridView` rows.
+- Test UI without touching the desktop: attach the view to a
+  `BBitmap(…, B_BITMAP_ACCEPTS_VIEWS, B_RGB32)`, `Layout(true)`, call `Draw()`
+  on every view in the tree yourself, save a PNG with the translation kit.
+  `B_RGBA32` plus `B_OP_ALPHA` came out striped.
+- Stock noise, not a bug in the change: loops over `kColorWhichCount` print
+  `ui_color_name(): unknown color_which 102` (a reserved slot).
+
+**Printing (patch 0021).** Haiku's PCL/PS/LIPS drivers don't fit most
+current printers, which want PWG raster (IPP Everywhere). The new driver asks
+the printer for resolutions, color modes and media once and caches them as
+`pwg:*` attributes on the printer folder. Gotchas:
+- The print add-ons live in `haiku_datatranslators`, not `haiku`; the stock
+  package already has an `IPP` transport, so the build overwrites it.
+- A transport that fails to load is skipped silently and print_server falls
+  back to the stock one: check syslog for `Could not resolve symbol` and test
+  with `load_add_on` (link `libshared.a`).
+- Epson answers plain IPP with `426 Upgrade Required` but takes TLS on 631;
+  Canon SELPHY fails TLS on its advertised port 443 but plain IPP works.
+- The VM sits behind QEMU's user networking, so it has no mDNS:
+  `find-printers.sh` browses Bonjour on the Mac (`ssh -n` inside its read
+  loop, or ssh eats the rest of the list).
+- libprint's `GraphicsDriver::ConvertToRGB24` reads B_RGB32 (BGRA) pixels as
+  `rgb_color`, swapping red and blue; the PWG driver converts by itself.
 
 **`pkgman` can't download anything**: `Refreshing repository … failed`,
 `Failed to download package curl: Operation not supported`. `libbnetapi.so` is
@@ -684,7 +753,8 @@ installs land in `non-packaged/bin`, which is on PATH.
 ## What's missing on arm64
 
 Blocked upstream: **Go** (no haiku/arm64 port),
-**gdb**, Java, GHC, Zig.
+**gdb** (Haiku's own Debugger works, see above), Java, GHC, Zig. No hardware
+breakpoints or watchpoints yet (software breakpoints only).
 
 HaikuPorts recipes allow arm64 but nothing has been built yet: autoconf,
 automake, libtool, pkg-config, cmake, meson, ninja, gettext, gcc 15, LLVM 23,

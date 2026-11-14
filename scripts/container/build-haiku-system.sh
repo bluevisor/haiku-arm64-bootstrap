@@ -1,10 +1,11 @@
 #!/bin/bash
 # Build every local Haiku change for one hrev in a single pass and package the
-# result as revision 2 of `haiku`, `haiku_devel` and `haiku_datatranslators`.
+# result as revision $PKG_REV (default 2) of `haiku`, `haiku_devel` and
+# `haiku_datatranslators`. Use a revision above what the VM has installed.
 # This replaces the one-fix-per-revision chain (build-haiku-chromium-fixes.sh ..
 # build-haiku-backtab.sh) and the hand-made "regular profile" revisions.
 #
-#   HREV_NUM=60368 bash build-haiku-system.sh
+#   HREV_NUM=60368 PKG_REV=4 bash build-haiku-system.sh
 #
 # Expects:
 #   /build/patches-hrev$HREV_NUM/*.patch   git format-patch output, from
@@ -14,8 +15,10 @@
 #                                          built on the VM
 #                                          (scripts/guest/build-image-translators-native.sh)
 #   the cross tools from build-cross-tools.sh, in /build/haiku/generated.arm64
+# Builds (once) the static Capstone and libedit the arm64 Debugger links:
+#   build-capstone.sh, build-libedit.sh (next to this script, or in /build)
 #
-# Writes /build/out/hrev$HREV_NUM/{haiku,haiku_devel,haiku_datatranslators}-r1~beta6_hrev$HREV_NUM-2-arm64.hpkg
+# Writes /build/out/hrev$HREV_NUM/{haiku,haiku_devel,haiku_datatranslators}-r1~beta6_hrev$HREV_NUM-$PKG_REV-arm64.hpkg
 #
 # The arm64 nightly is the *minimum* profile. The plain jam build here is the
 # *regular* profile (Mail, MediaPlayer, HaikuDepot, the media kit, more
@@ -27,6 +30,7 @@
 set -euxo pipefail
 
 N=${HREV_NUM:?set HREV_NUM, e.g. 60368}
+REV=${PKG_REV:-2}
 HREV=r1~beta6_hrev$N
 NATIVE_TRANSLATORS=${NATIVE_TRANSLATORS:?set NATIVE_TRANSLATORS to a haiku_datatranslators .hpkg with the native PNG/JPEG/WebP translators}
 G=/build/haiku/generated.arm64
@@ -80,6 +84,12 @@ rm -rf $STAGE && mkdir -p $STAGE/develop/headers $STAGE/develop/lib
 cp -a $NP/include/openssl $STAGE/develop/headers/
 for l in ssl crypto; do ln -s $NP/lib/lib$l.so.3 $STAGE/develop/lib/lib$l.so; done
 
+# 2b. Static Capstone (Debugger disassembler) and libedit (Debugger command
+# line); neither is packaged for arm64
+HERE=$(cd "$(dirname "$0")" && pwd)
+[ -f /build/deps/capstone-arm64/lib/libcapstone.a ] || bash "$HERE/build-capstone.sh"
+[ -f /build/deps/libedit-arm64/lib/libedit.a ] || bash "$HERE/build-libedit.sh"
+
 # 3. The regular-profile packages in one jam run. Jam doesn't notice changed
 # flags or build rules, so a new hrev starts from empty target objects (the
 # host tools and cross tools are kept). HAIKU_DISTRO_COMPATIBILITY=official is
@@ -131,6 +141,7 @@ cd $W/haiku
 LIB=$W/haiku-regular/lib/libbnetapi.so
 $X/bin/aarch64-unknown-haiku-readelf -d $LIB | grep -q 'NEEDED.*\[libssl\.so\.3\]'
 for f in kernel_arm64 runtime_loader lib/libroot.so lib/libbnetapi.so \
+		lib/libbe.so lib/libdebugger.so \
 		add-ons/kernel/network/protocols/tcp servers/input_server \
 		servers/app_server add-ons/kernel/drivers/graphics/virtio_gpu \
 		add-ons/input_server/devices/mouse \
@@ -148,10 +159,14 @@ cmp add-ons/kernel/drivers/bin/hda $O/add-ons/kernel/drivers/audio/hda/hda
 # arm64 doesn't have, and add our provides markers and libbnetapi's OpenSSL
 cp $W/haiku-regular/.PackageInfo .PackageInfo
 sed -i "/^\tnoto_sans_cjk_jp$/d;/^\t[a-z]*_wifi_firmwares$/d" .PackageInfo
-sed -i "s/^\thaiku=$HREV-1 compat>=r1~beta1$/&\n\thaiku_rchromium_fixes=1\n\thaiku_bnetapi_ssl=1\n\thaiku_arm64_psci_shutdown=1\n\thaiku_tcp_eof_after_close=1\n\thaiku_mouse_natural_scrolling=1\n\thaiku_appearance_dark_mode=1\n\thaiku_terminal_mouse_wheel=1\n\thaiku_terminal_back_tab=1\n\thaiku_regular_profile=1\n\thaiku_libroot_arm64_swap_float=1\n\thaiku_app_server_offscreen_targets=1/" .PackageInfo
+sed -i "s/^\thaiku=$HREV-1 compat>=r1~beta1$/&\n\thaiku_rchromium_fixes=1\n\thaiku_bnetapi_ssl=1\n\thaiku_arm64_psci_shutdown=1\n\thaiku_tcp_eof_after_close=1\n\thaiku_mouse_natural_scrolling=1\n\thaiku_appearance_dark_mode=1\n\thaiku_terminal_mouse_wheel=1\n\thaiku_terminal_back_tab=1\n\thaiku_regular_profile=1\n\thaiku_libroot_arm64_swap_float=1\n\thaiku_app_server_offscreen_targets=1\n\thaiku_dark_mode_amber_tabs=1\n\thaiku_arm64_pl031_rtc=1\n\thaiku_arm64_user_debugger=1\n\thaiku_print_ipp_everywhere=1\n\thaiku_appearance_color_themes=1/" .PackageInfo
 sed -i "s/^\tlib:libz>=1.2.13$/&\n\tlib:libssl>=3\n\tlib:libcrypto>=3/" .PackageInfo
 grep -q "^version[[:space:]]r1~beta6_hrev$N-1$" .PackageInfo
 grep -q haiku_app_server_offscreen_targets .PackageInfo
+grep -q haiku_arm64_user_debugger .PackageInfo
+[ -f apps/Debugger ]
+grep -q haiku_print_ipp_everywhere .PackageInfo
+grep -q haiku_appearance_color_themes .PackageInfo
 grep -q lib:libssl .PackageInfo
 ! grep -q wifi_firmwares .PackageInfo
 
@@ -159,6 +174,11 @@ grep -q lib:libssl .PackageInfo
 # (arm64 has no libpng/jpeg/webp build packages, so jam skips them)
 cd $W/haiku_datatranslators
 add_missing $W/haiku_datatranslators-regular .
+# the print add-ons are in this package; the stock IPP transport is replaced
+# by 0021's (TLS, IPP/1.1), and "IPP Everywhere" is new
+cat $W/haiku_datatranslators-regular/add-ons/Print/transport/IPP \
+	> add-ons/Print/transport/IPP
+[ -f "add-ons/Print/IPP Everywhere" ]
 for t in PNGTranslator JPEGTranslator WebPTranslator; do
 	rm -f add-ons/Translators/$t
 	cp -a $W/translators-native/add-ons/Translators/$t add-ons/Translators/$t
@@ -172,7 +192,7 @@ grep -q "lib:libwebp" .PackageInfo
 # for the regular profile's libraries (without them `-lmedia`, `-lgame`,
 # `-lmidi` ... fail). jam's own haiku_devel.hpkg can't be built here: it needs
 # the HaikuPorts arm64 build-packages index, which is gone (404).
-# haiku_devel requires haiku==<exact version>, so all three move to -2
+# haiku_devel requires haiku==<exact version>, so all three move to -$REV
 # together.
 unpack /build/hpkg/haiku_devel-$HREV-1-arm64.hpkg $W/haiku_devel
 for f in $W/haiku/lib/lib*.so; do
@@ -184,10 +204,10 @@ done
 [ -L $W/haiku_devel/develop/lib/libmedia.so ]
 for p in haiku haiku_devel haiku_datatranslators; do
 	cd $W/$p
-	sed -i "s/hrev$N-1/hrev$N-2/g" .PackageInfo
-	grep -q "hrev$N-2" .PackageInfo
+	sed -i "s/hrev$N-1/hrev$N-$REV/g" .PackageInfo
+	grep -q "hrev$N-$REV" .PackageInfo
 	# the arm64 packagefs cannot read zstd: force zlib
-	$PKG create -q -z zlib -i .PackageInfo "$OUT/$p-$HREV-2-arm64.hpkg"
+	$PKG create -q -z zlib -i .PackageInfo "$OUT/$p-$HREV-$REV-arm64.hpkg"
 done
 
 # 8. Quick Look's libtracker (patch 0017), for scripts/guest/install-libtracker.sh

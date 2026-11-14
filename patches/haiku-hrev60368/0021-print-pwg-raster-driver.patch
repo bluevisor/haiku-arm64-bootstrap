@@ -1,0 +1,4298 @@
+From 39ad3fa73ecdd77d4d138c80c9cfa3c9bb868509 Mon Sep 17 00:00:00 2001
+From: John Zheng <bluevisor@gmail.com>
+Date: Fri, 6 Nov 2026 21:07:08 +0000
+Subject: [PATCH 2/6] print: IPP Everywhere (PWG raster) driver, IPP transport
+ over TLS
+
+Most network printers sold today accept only PWG raster or Apple raster
+over IPP ("IPP Everywhere" / AirPrint), not PCL or PostScript, so none of
+Haiku's drivers could print to them.
+
+New driver "IPP Everywhere" (drivers/pwg): renders each page with libprint's
+GraphicsDriver and writes PWG 5102.4 raster: 8-bit sGray, sRGB or RGB,
+the whole sheet with the printable area centered, line-repeat and
+PackBits-style run-length compression. It asks the printer (IPP
+Get-Printer-Attributes) for its resolutions, raster types and media the
+first time and caches them as attributes on the printer folder
+(pwg:resolutions, pwg:types, pwg:media, pwg:media-default), so Page Setup
+offers only what the printer takes.
+
+IPP transport: the hand-rolled HTTP/IPP 1.0 code is replaced by a small
+IPP/1.1 client (transports/shared/IppClient) on BSocket/BSecureSocket.
+It handles ipps:// URIs, upgrades to TLS when a printer answers "426
+Upgrade Required" (Epson requires TLS), accepts the self-signed
+certificates printers use, decodes chunked responses, and reports the
+printer's status-message on failure. Print-Job now sends a
+document-format matching the driver (image/pwg-raster for IPP
+Everywhere, application/postscript for PS Compatible, otherwise
+application/octet-stream; an "ipp:document-format" attribute on the
+printer overrides it) instead of always application/octet-stream.
+---
+ build/jam/images/definitions/regular          |    1 +
+ src/add-ons/print/drivers/Jamfile             |    1 +
+ src/add-ons/print/drivers/pwg/Jamfile         |   17 +
+ src/add-ons/print/drivers/pwg/PWG.cpp         |  318 +++++
+ src/add-ons/print/drivers/pwg/PWG.h           |   61 +
+ src/add-ons/print/drivers/pwg/PWG.rdef        |   37 +
+ src/add-ons/print/drivers/pwg/PWGCap.cpp      |  349 +++++
+ src/add-ons/print/drivers/pwg/PWGCap.h        |   75 +
+ src/add-ons/print/drivers/pwg/PWGEntry.cpp    |   58 +
+ .../transports/ipp/HttpURLConnection.cpp      |  324 -----
+ .../print/transports/ipp/HttpURLConnection.h  |  142 --
+ .../print/transports/ipp/IppContent.cpp       | 1269 -----------------
+ src/add-ons/print/transports/ipp/IppContent.h |  451 ------
+ src/add-ons/print/transports/ipp/IppDefs.h    |    1 +
+ .../print/transports/ipp/IppSetupDlg.cpp      |   53 +-
+ .../print/transports/ipp/IppTransport.cpp     |   80 +-
+ .../print/transports/ipp/IppTransport.h       |    1 +
+ .../print/transports/ipp/IppURLConnection.cpp |  106 --
+ .../print/transports/ipp/IppURLConnection.h   |   34 -
+ src/add-ons/print/transports/ipp/Jamfile      |    9 +-
+ .../print/transports/shared/IppClient.cpp     |  506 +++++++
+ .../print/transports/shared/IppClient.h       |  107 ++
+ src/add-ons/print/transports/shared/Jamfile   |    1 +
+ 23 files changed, 1591 insertions(+), 2410 deletions(-)
+ create mode 100644 src/add-ons/print/drivers/pwg/Jamfile
+ create mode 100644 src/add-ons/print/drivers/pwg/PWG.cpp
+ create mode 100644 src/add-ons/print/drivers/pwg/PWG.h
+ create mode 100644 src/add-ons/print/drivers/pwg/PWG.rdef
+ create mode 100644 src/add-ons/print/drivers/pwg/PWGCap.cpp
+ create mode 100644 src/add-ons/print/drivers/pwg/PWGCap.h
+ create mode 100644 src/add-ons/print/drivers/pwg/PWGEntry.cpp
+ delete mode 100644 src/add-ons/print/transports/ipp/HttpURLConnection.cpp
+ delete mode 100644 src/add-ons/print/transports/ipp/HttpURLConnection.h
+ delete mode 100644 src/add-ons/print/transports/ipp/IppContent.cpp
+ delete mode 100644 src/add-ons/print/transports/ipp/IppContent.h
+ delete mode 100644 src/add-ons/print/transports/ipp/IppURLConnection.cpp
+ delete mode 100644 src/add-ons/print/transports/ipp/IppURLConnection.h
+ create mode 100644 src/add-ons/print/transports/shared/IppClient.cpp
+ create mode 100644 src/add-ons/print/transports/shared/IppClient.h
+
+diff --git a/build/jam/images/definitions/regular b/build/jam/images/definitions/regular
+index 49514ef2..060e2e17 100644
+--- a/build/jam/images/definitions/regular
++++ b/build/jam/images/definitions/regular
+@@ -243,6 +243,7 @@ SYSTEM_ADD_ONS_PRINT += [ FFilterByBuildFeatures
+ 	Canon\ LIPS3\ Compatible
+ 	Canon\ LIPS4\ Compatible
+ 	Gutenprint@gutenprint
++	IPP\ Everywhere
+ 	PCL5\ Compatible
+ 	PCL6\ Compatible
+ 	PS\ Compatible
+diff --git a/src/add-ons/print/drivers/Jamfile b/src/add-ons/print/drivers/Jamfile
+index 5b6a0d46..4909ceed 100644
+--- a/src/add-ons/print/drivers/Jamfile
++++ b/src/add-ons/print/drivers/Jamfile
+@@ -6,4 +6,5 @@ SubInclude HAIKU_TOP src add-ons print drivers lpstyl ;
+ SubInclude HAIKU_TOP src add-ons print drivers pcl5 ;
+ SubInclude HAIKU_TOP src add-ons print drivers pcl6 ;
+ SubInclude HAIKU_TOP src add-ons print drivers postscript ;
++SubInclude HAIKU_TOP src add-ons print drivers pwg ;
+ SubInclude HAIKU_TOP src add-ons print drivers preview ;
+diff --git a/src/add-ons/print/drivers/pwg/Jamfile b/src/add-ons/print/drivers/pwg/Jamfile
+new file mode 100644
+index 00000000..33a0ae50
+--- /dev/null
++++ b/src/add-ons/print/drivers/pwg/Jamfile
+@@ -0,0 +1,17 @@
++SubDir HAIKU_TOP src add-ons print drivers pwg ;
++
++SubDirHdrs [ FDirName $(HAIKU_TOP) headers libs print libprint ] ;
++
++# the IPP client is shared with the IPP transport
++SEARCH_SOURCE += [ FDirName $(HAIKU_TOP) src add-ons print transports shared ] ;
++
++AddResources IPP\ Everywhere : PWG.rdef ;
++
++Addon IPP\ Everywhere :
++	PWGEntry.cpp
++	PWG.cpp
++	PWGCap.cpp
++	IppClient.cpp
++	: be libprint.a $(TARGET_NETAPI_LIB) $(TARGET_NETWORK_LIBS)
++		[ TargetLibstdc++ ]
++;
+diff --git a/src/add-ons/print/drivers/pwg/PWG.cpp b/src/add-ons/print/drivers/pwg/PWG.cpp
+new file mode 100644
+index 00000000..738cd045
+--- /dev/null
++++ b/src/add-ons/print/drivers/pwg/PWG.cpp
+@@ -0,0 +1,318 @@
++/*
++ * Copyright 2026 Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "PWG.h"
++
++#include <string.h>
++
++#include <Bitmap.h>
++#include <InterfaceDefs.h>
++
++#include "JobData.h"
++#include "PWGCap.h"
++#include "PrinterData.h"
++
++
++static const size_t kHeaderSize = 1796;
++
++
++static void
++put_string(uint8* header, size_t offset, const char* value)
++{
++	strncpy((char*)header + offset, value, 63);
++}
++
++
++static void
++put_uint32(uint8* header, size_t offset, uint32 value)
++{
++	header[offset] = value >> 24;
++	header[offset + 1] = value >> 16;
++	header[offset + 2] = value >> 8;
++	header[offset + 3] = value;
++}
++
++
++PWGDriver::PWGDriver(BMessage* message, PrinterData* printerData,
++	const PrinterCap* printerCap)
++	:
++	GraphicsDriver(message, printerData, printerCap),
++	fPaper(NULL),
++	fColorSpace(kPWGColorSpaceSGray),
++	fBytesPerPixel(1),
++	fWidth(0),
++	fHeight(0),
++	fLeft(0),
++	fTop(0),
++	fLines(0),
++	fRasterStarted(false),
++	fHavePrevious(false),
++	fRepeat(0)
++{
++}
++
++
++bool
++PWGDriver::StartDocument()
++{
++	const PWGCap* cap = static_cast<const PWGCap*>(GetPrinterCap());
++	const JobData* job = GetJobData();
++
++	fPaper = cap->FindPaper(job->GetPaper());
++	fColorSpace = cap->ColorSpace(job->GetColor() == JobData::kColor);
++	fBytesPerPixel = fColorSpace == kPWGColorSpaceSGray ? 1 : 3;
++	fWidth = (int)(fPaper->fPaperRect.Width() * job->GetXres() / 72.0f + 0.5f);
++	fHeight = (int)(fPaper->fPaperRect.Height() * job->GetYres() / 72.0f
++		+ 0.5f);
++
++	try {
++		WriteSpoolData("RaS2", 4);
++		return true;
++	} catch (TransportException& exception) {
++		return false;
++	}
++}
++
++
++bool
++PWGDriver::StartPage(int)
++{
++	fRasterStarted = false;
++	fLines = 0;
++	fHavePrevious = false;
++	fRepeat = 0;
++	return true;
++}
++
++
++bool
++PWGDriver::NextBand(BBitmap* bitmap, BPoint* offset)
++{
++	try {
++		BRect bounds = bitmap->Bounds();
++		int bandWidth = bounds.IntegerWidth() + 1;
++		int height = bounds.IntegerHeight() + 1;
++		int y = (int)offset->y;
++		int pageHeight = GetPageHeight();
++		if (y + height > pageHeight)
++			height = pageHeight - y;
++
++		if (!fRasterStarted)
++			_BeginRaster(bandWidth);
++
++		int width = min_c(bandWidth, fWidth - fLeft);
++		const uint8* row = (const uint8*)bitmap->Bits();
++		int32 bytesPerRow = bitmap->BytesPerRow();
++		for (int i = 0; i < height; i++) {
++			memset(&fLine[0], 0xff, fLine.size());
++			if (width > 0) {
++				_ConvertRow(row, bitmap->ColorSpace(), width,
++					&fLine[fLeft * fBytesPerPixel]);
++			}
++			_AddLine();
++			row += bytesPerRow;
++		}
++
++		y += height;
++		if (y >= pageHeight) {
++			offset->x = -1.0;
++			offset->y = -1.0;
++		} else
++			offset->y += height;
++		return true;
++	} catch (TransportException& exception) {
++		return false;
++	}
++}
++
++
++bool
++PWGDriver::EndPage(int)
++{
++	try {
++		if (!fRasterStarted)
++			_BeginRaster(fWidth);
++		_AddBlankLines(fHeight - fLines);
++		_FlushLine();
++		return true;
++	} catch (TransportException& exception) {
++		return false;
++	}
++}
++
++
++bool
++PWGDriver::EndDocument(bool)
++{
++	return true;
++}
++
++
++void
++PWGDriver::_BeginRaster(int bandWidth)
++{
++	// the bitmap holds the printable area, centered on the sheet
++	fLeft = max_c(0, (fWidth - bandWidth) / 2);
++	fTop = max_c(0, (fHeight - GetPageHeight()) / 2);
++	fLine.assign(fWidth * fBytesPerPixel, 0xff);
++	fRasterStarted = true;
++
++	_WriteHeader();
++	_AddBlankLines(fTop);
++}
++
++
++void
++PWGDriver::_WriteHeader()
++{
++	const JobData* job = GetJobData();
++	uint8 header[kHeaderSize];
++	memset(header, 0, sizeof(header));
++
++	put_string(header, 0, "PwgRaster");
++	put_uint32(header, 276, job->GetXres());			// HWResolution
++	put_uint32(header, 280, job->GetYres());
++	put_uint32(header, 340, 1);							// NumCopies
++	put_uint32(header, 352, (uint32)(fPaper->fPaperRect.Width() + 0.5f));
++	put_uint32(header, 356, (uint32)(fPaper->fPaperRect.Height() + 0.5f));
++		// PageSize, in points
++	put_uint32(header, 372, fWidth);
++	put_uint32(header, 376, fHeight);
++	put_uint32(header, 384, 8);							// BitsPerColor
++	put_uint32(header, 388, 8 * fBytesPerPixel);		// BitsPerPixel
++	put_uint32(header, 392, fWidth * fBytesPerPixel);	// BytesPerLine
++	put_uint32(header, 396, 0);							// ColorOrder: chunky
++	put_uint32(header, 400, fColorSpace);
++	put_uint32(header, 420, fBytesPerPixel);			// NumColors
++	put_uint32(header, 452 + 4 * 1, 1);					// CrossFeedTransform
++	put_uint32(header, 452 + 4 * 2, 1);					// FeedTransform
++	put_uint32(header, 452 + 4 * 3, fLeft);				// ImageBoxLeft
++	put_uint32(header, 452 + 4 * 4, fTop);				// ImageBoxTop
++	put_uint32(header, 452 + 4 * 5, fWidth - fLeft);	// ImageBoxRight
++	put_uint32(header, 452 + 4 * 6, fHeight - fTop);	// ImageBoxBottom
++	put_uint32(header, 452 + 4 * 7, 0xffffff);			// AlternatePrimary
++	put_string(header, 1732, fPaper->fMediaName.String());
++		// PageSizeName
++
++	WriteSpoolData(header, sizeof(header));
++}
++
++
++void
++PWGDriver::_ConvertRow(const uint8* source, color_space space, int width,
++	uint8* destination) const
++{
++	const color_map* map = space == B_CMAP8 ? system_colors() : NULL;
++
++	for (int x = 0; x < width; x++) {
++		uint8 red, green, blue;
++		switch (space) {
++			case B_CMAP8:
++			{
++				const rgb_color& color = map->color_list[source[x]];
++				red = color.red;
++				green = color.green;
++				blue = color.blue;
++				break;
++			}
++			case B_GRAY8:
++				red = green = blue = source[x];
++				break;
++			default:
++				// B_RGB32 / B_RGBA32: blue, green, red, alpha in memory
++				blue = source[4 * x];
++				green = source[4 * x + 1];
++				red = source[4 * x + 2];
++				break;
++		}
++
++		if (fBytesPerPixel == 1) {
++			destination[x] = red == green && green == blue ? red
++				: (uint8)((red * 77 + green * 150 + blue * 29) >> 8);
++		} else {
++			destination[3 * x] = red;
++			destination[3 * x + 1] = green;
++			destination[3 * x + 2] = blue;
++		}
++	}
++}
++
++
++void
++PWGDriver::_AddLine()
++{
++	if (fLines >= fHeight)
++		return;
++	fLines++;
++
++	if (fHavePrevious && fRepeat < 255 && fLine == fPrevious) {
++		fRepeat++;
++		return;
++	}
++	_FlushLine();
++	fPrevious = fLine;
++	fHavePrevious = true;
++	fRepeat = 0;
++}
++
++
++void
++PWGDriver::_AddBlankLines(int count)
++{
++	memset(&fLine[0], 0xff, fLine.size());
++	for (int i = 0; i < count; i++)
++		_AddLine();
++}
++
++
++// Encodes the pending line: a repeat count, then runs of pixels, each
++// either one pixel repeated n + 1 times (n < 128) or 257 - n literal pixels
++// (n > 128).
++void
++PWGDriver::_FlushLine()
++{
++	if (!fHavePrevious)
++		return;
++	fHavePrevious = false;
++
++	const int bpp = fBytesPerPixel;
++	const uint8* line = &fPrevious[0];
++	fOutput.clear();
++	fOutput.push_back((uint8)fRepeat);
++
++	int x = 0;
++	while (x < fWidth) {
++		int run = 1;
++		while (x + run < fWidth && run < 128
++			&& memcmp(line + x * bpp, line + (x + run) * bpp, bpp) == 0) {
++			run++;
++		}
++		if (run > 1) {
++			fOutput.push_back((uint8)(run - 1));
++			fOutput.insert(fOutput.end(), line + x * bpp, line + (x + 1) * bpp);
++			x += run;
++			continue;
++		}
++
++		// literal pixels, up to the start of the next repeated pair
++		int count = 1;
++		while (x + count < fWidth && count < 128
++			&& !(x + count + 1 < fWidth
++				&& memcmp(line + (x + count) * bpp,
++					line + (x + count + 1) * bpp, bpp) == 0)) {
++			count++;
++		}
++		if (count == 1)
++			fOutput.push_back(0);
++		else
++			fOutput.push_back((uint8)(257 - count));
++		fOutput.insert(fOutput.end(), line + x * bpp,
++			line + (x + count) * bpp);
++		x += count;
++	}
++
++	WriteSpoolData(&fOutput[0], fOutput.size());
++}
+diff --git a/src/add-ons/print/drivers/pwg/PWG.h b/src/add-ons/print/drivers/pwg/PWG.h
+new file mode 100644
+index 00000000..b43835df
+--- /dev/null
++++ b/src/add-ons/print/drivers/pwg/PWG.h
+@@ -0,0 +1,61 @@
++/*
++ * Copyright 2026 Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef PWG_H
++#define PWG_H
++
++
++#include <vector>
++
++#include "GraphicsDriver.h"
++
++
++class PWGPaperCap;
++
++
++// Writes PWG Raster (PWG 5102.4, "image/pwg-raster"), the page format of
++// IPP Everywhere printers: an 8-bit gray or RGB bitmap of the whole sheet
++// per page, run-length compressed.
++class PWGDriver : public GraphicsDriver {
++public:
++						PWGDriver(BMessage* message, PrinterData* printerData,
++							const PrinterCap* printerCap);
++
++protected:
++	virtual	bool		StartDocument();
++	virtual	bool		StartPage(int page);
++	virtual	bool		NextBand(BBitmap* bitmap, BPoint* offset);
++	virtual	bool		EndPage(int page);
++	virtual	bool		EndDocument(bool success);
++
++private:
++			void		_BeginRaster(int bandWidth);
++			void		_WriteHeader();
++			void		_ConvertRow(const uint8* source, color_space space,
++							int width, uint8* destination) const;
++			void		_AddLine();
++			void		_AddBlankLines(int count);
++			void		_FlushLine();
++
++			const PWGPaperCap* fPaper;
++			int			fColorSpace;
++			int			fBytesPerPixel;
++			int			fWidth;
++			int			fHeight;
++				// pixels of the whole sheet
++			int			fLeft;
++			int			fTop;
++				// where the rendered (printable) area starts
++			int			fLines;
++			bool		fRasterStarted;
++
++			std::vector<uint8>	fLine;
++			std::vector<uint8>	fPrevious;
++			bool		fHavePrevious;
++			int			fRepeat;
++			std::vector<uint8>	fOutput;
++};
++
++
++#endif	// PWG_H
+diff --git a/src/add-ons/print/drivers/pwg/PWG.rdef b/src/add-ons/print/drivers/pwg/PWG.rdef
+new file mode 100644
+index 00000000..6c102027
+--- /dev/null
++++ b/src/add-ons/print/drivers/pwg/PWG.rdef
+@@ -0,0 +1,37 @@
++resource app_signature "application/x-vnd.ipp-everywhere";
++
++resource app_flags B_SINGLE_LAUNCH;
++
++resource app_version {
++	major  = 1,
++	middle = 0,
++	minor  = 0,
++
++	variety = B_APPV_FINAL,
++	internal = 0,
++
++	short_info = "IPP Everywhere",
++	long_info = "IPP Everywhere (PWG Raster) printer driver for Haiku"
++};
++
++resource vector_icon {
++	$"6E6369660B050002001602B76E71BBF8593D1210B8A7674742A04ABEFB00AEFF"
++	$"E1053802001603373333B9333339333337333348E54F4B555400FFBFE5FF9B02"
++	$"00160336C6F3B9284239E397376BB94A71BE484A25005346B5FFFF02001602B5"
++	$"00003A6000BA6000B500004A2E244AB9D001C0FF9A020116023AA41339C70ABC"
++	$"27003D026E4ACAB74AC8AB0183FFAD020106023600000000000000003700004A"
++	$"10004AB0000035FF06FB1E9303020106023600000000000000003700004A1000"
++	$"4AB00000FFE3E3FFDD05050101000073020116023E1E41BC9E393B21B93C88A6"
++	$"4824E3485D850090FF3C0B0606BE023A5F485C46584C5E5656525A5656604C58"
++	$"483A0608EFB6302E302E25372248223A2248465A4A59485B4A59584B41573E58"
++	$"3F563D543C0608AAFF503A4E3C3231342F302E302E25372248223A2248465A46"
++	$"5A464C543C4A46543C0606FF06573E583F563D543C543C4A46465A464C465A4A"
++	$"59485B4A59584B410604DB4A594A4F4A59584B41563F563F4E470A0426484256"
++	$"4252264406057A0322513A5E42543C58425452B77BC262B77BC262254A080228"
++	$"5038580A06542A3C22353135324C3B4C3A0202404A3E4C4248434D454B414F02"
++	$"0332332B3332334B3E4B3E453E3547444E26400F0A090100000A000301060810"
++	$"01178400040A010102000A0001051001178200040A020105000A030106000A04"
++	$"0108000A050103000A060104000A08010920251C0A0701092022210A00010730"
++	$"241C01178100040A00010730221E01178100040A0001071815FF01178100040A"
++	$"0A010A00"
++};
+diff --git a/src/add-ons/print/drivers/pwg/PWGCap.cpp b/src/add-ons/print/drivers/pwg/PWGCap.cpp
+new file mode 100644
+index 00000000..8e1b1986
+--- /dev/null
++++ b/src/add-ons/print/drivers/pwg/PWGCap.cpp
+@@ -0,0 +1,349 @@
++/*
++ * Copyright 2026 Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "PWGCap.h"
++
++#include <stdlib.h>
++#include <string.h>
++
++#include <Node.h>
++#include <StringList.h>
++
++#include "IppClient.h"
++#include "PrinterData.h"
++
++
++// Keep content clear of the printers' unprintable edges; the driver still
++// sends the whole sheet, with these margins left white.
++static const float kMargin = 18.0f;
++	// 1/4 inch
++
++
++struct MediaInfo {
++	JobData::Paper	paper;
++	const char*		label;
++	const char*		name;
++	float			width;	// points
++	float			height;
++};
++
++
++static const MediaInfo kMedia[] = {
++	{ JobData::kLetter, "Letter", "na_letter_8.5x11in", 612, 792 },
++	{ JobData::kLegal, "Legal", "na_legal_8.5x14in", 612, 1008 },
++	{ JobData::kExecutive, "Executive", "na_executive_7.25x10.5in", 522,
++		756 },
++	{ JobData::kTabloid, "Tabloid", "na_ledger_11x17in", 792, 1224 },
++	{ JobData::kA3, "A3", "iso_a3_297x420mm", 841.89f, 1190.55f },
++	{ JobData::kA4, "A4", "iso_a4_210x297mm", 595.28f, 841.89f },
++	{ JobData::kA5, "A5", "iso_a5_148x210mm", 419.53f, 595.28f },
++	{ JobData::kB5, "B5 (JIS)", "jis_b5_182x257mm", 515.91f, 728.50f },
++	{ JobData::kEnv10, "Envelope #10", "na_number-10_4.125x9.5in", 297,
++		684 },
++	{ JobData::kEnvDL, "Envelope DL", "iso_dl_110x220mm", 311.81f, 623.62f },
++	{ JobData::kJapanesePostcard, "Postcard (Hagaki)",
++		"jpn_hagaki_100x148mm", 283.46f, 419.53f },
++};
++
++
++static BString
++read_string_attr(BNode& node, const char* name, bool* exists = NULL)
++{
++	BString value;
++	status_t status = node.ReadAttrString(name, &value);
++	if (exists != NULL)
++		*exists = status == B_OK;
++	return value;
++}
++
++
++static bool
++list_contains(const BString& list, const char* item)
++{
++	BStringList items;
++	list.Split(",", true, items);
++	return items.HasString(item);
++}
++
++
++// #pragma mark - PWGPaperCap
++
++
++PWGPaperCap::PWGPaperCap(const char* label, bool isDefault,
++	JobData::Paper paper, float width, float height, const char* mediaName)
++	:
++	PaperCap(label, isDefault, paper, BRect(0, 0, width, height),
++		BRect(kMargin, kMargin, width - kMargin, height - kMargin)),
++	fMediaName(mediaName)
++{
++}
++
++
++// #pragma mark - PWGCap
++
++
++PWGCap::PWGCap(const PrinterData* printerData)
++	:
++	PrinterCap(printerData)
++{
++	string path;
++	BNode node;
++	if (printerData != NULL && printerData->GetPath(path))
++		node.SetTo(path.c_str());
++
++	_Load(node, true);
++}
++
++
++PWGCap::~PWGCap()
++{
++	for (size_t i = 0; i < fPapers.size(); i++)
++		delete fPapers[i];
++	for (size_t i = 0; i < fPaperSources.size(); i++)
++		delete fPaperSources[i];
++	for (size_t i = 0; i < fResolutions.size(); i++)
++		delete fResolutions[i];
++	for (size_t i = 0; i < fColors.size(); i++)
++		delete fColors[i];
++}
++
++
++/*static*/ status_t
++PWGCap::QueryPrinter(const char* uri, BNode& node, BString& error)
++{
++	IppClient::Request request(IppClient::kGetPrinterAttributes, uri);
++	request.AddString(IppClient::kKeyword, "requested-attributes",
++		"pwg-raster-document-resolution-supported");
++	request.AddValue(IppClient::kKeyword,
++		"pwg-raster-document-type-supported");
++	request.AddValue(IppClient::kKeyword, "media-supported");
++	request.AddValue(IppClient::kKeyword, "media-default");
++	request.AddValue(IppClient::kKeyword, "printer-make-and-model");
++
++	IppClient::Response response;
++	status_t status = IppClient::Send(uri, request, NULL, response, error,
++		5000000LL);
++	if (status != B_OK)
++		return status;
++	if (!response.Succeeded()) {
++		error = response.StatusText();
++		return B_ERROR;
++	}
++
++	const IppClient::Attribute* attribute
++		= response.Find("pwg-raster-document-resolution-supported");
++	if (attribute == NULL) {
++		error = "The printer does not accept PWG raster documents.";
++		return B_NOT_SUPPORTED;
++	}
++
++	BString resolutions;
++	for (size_t i = 0; i < attribute->values.size(); i++) {
++		int32 dpi = attribute->ResolutionAt(i);
++		if (dpi <= 0)
++			continue;
++		if (resolutions.Length() > 0)
++			resolutions << ",";
++		resolutions << dpi;
++	}
++	node.WriteAttrString(PWG_ATTR_RESOLUTIONS, &resolutions);
++
++	struct {
++		const char* ipp;
++		const char* attr;
++	} lists[] = {
++		{ "pwg-raster-document-type-supported", PWG_ATTR_TYPES },
++		{ "media-supported", PWG_ATTR_MEDIA },
++		{ "media-default", PWG_ATTR_MEDIA_DEFAULT },
++		{ "printer-make-and-model", PWG_ATTR_MODEL },
++	};
++	for (size_t i = 0; i < B_COUNT_OF(lists); i++) {
++		attribute = response.Find(lists[i].ipp);
++		if (attribute == NULL)
++			continue;
++		BString value;
++		for (size_t j = 0; j < attribute->values.size(); j++) {
++			if (j > 0)
++				value << ",";
++			value << attribute->values[j].c_str();
++		}
++		node.WriteAttrString(lists[i].attr, &value);
++	}
++	return B_OK;
++}
++
++
++void
++PWGCap::_Load(BNode& node, bool query)
++{
++	bool known = false;
++	if (node.InitCheck() == B_OK) {
++		read_string_attr(node, PWG_ATTR_RESOLUTIONS, &known);
++		if (!known && query) {
++			// first use: ask the printer what it can do
++			BString transport = read_string_attr(node, "transport");
++			BString uri = read_string_attr(node, "transport_address");
++			BString error;
++			if (transport == "IPP" && uri.Length() > 0)
++				known = QueryPrinter(uri, node, error) == B_OK;
++		}
++	}
++
++	BString resolutions = known
++		? read_string_attr(node, PWG_ATTR_RESOLUTIONS) : BString("300,600");
++	fTypes = known ? read_string_attr(node, PWG_ATTR_TYPES) : BString();
++	BString media = known ? read_string_attr(node, PWG_ATTR_MEDIA) : BString();
++	BString mediaDefault = known
++		? read_string_attr(node, PWG_ATTR_MEDIA_DEFAULT) : BString();
++
++	// Papers: the ones the printer lists, or a basic set if it lists none
++	bool anyMedia = false;
++	for (size_t i = 0; i < B_COUNT_OF(kMedia); i++) {
++		if (media.Length() > 0 && list_contains(media, kMedia[i].name))
++			anyMedia = true;
++	}
++	if (mediaDefault.Length() == 0)
++		mediaDefault = "na_letter_8.5x11in";
++	for (size_t i = 0; i < B_COUNT_OF(kMedia); i++) {
++		bool listed = anyMedia ? list_contains(media, kMedia[i].name)
++			: (kMedia[i].paper == JobData::kLetter
++				|| kMedia[i].paper == JobData::kLegal
++				|| kMedia[i].paper == JobData::kA4
++				|| kMedia[i].paper == JobData::kA5
++				|| mediaDefault == kMedia[i].name);
++		if (!listed)
++			continue;
++		bool isDefault = mediaDefault == kMedia[i].name;
++		fPapers.push_back(new PWGPaperCap(kMedia[i].label, isDefault,
++			kMedia[i].paper, kMedia[i].width, kMedia[i].height,
++			kMedia[i].name));
++	}
++	// without a default, libprint picks the first paper
++	if (fPapers.empty()) {
++		fPapers.push_back(new PWGPaperCap(kMedia[0].label, true,
++			kMedia[0].paper, kMedia[0].width, kMedia[0].height,
++			kMedia[0].name));
++	}
++
++	fPaperSources.push_back(new PaperSourceCap("Auto", true, JobData::kAuto));
++
++	// Resolutions: the best one up to 600 dpi is the default
++	BStringList items;
++	resolutions.Split(",", true, items);
++	int32 best = 0;
++	for (int32 i = 0; i < items.CountStrings(); i++) {
++		int32 dpi = atoi(items.StringAt(i));
++		if (dpi > best && dpi <= 600)
++			best = dpi;
++	}
++	for (int32 i = 0; i < items.CountStrings(); i++) {
++		int32 dpi = atoi(items.StringAt(i));
++		if (dpi <= 0)
++			continue;
++		BString label;
++		label << dpi << " dpi";
++		fResolutions.push_back(new ResolutionCap(label.String(), dpi == best,
++			dpi, dpi, dpi));
++	}
++	if (fResolutions.empty())
++		fResolutions.push_back(new ResolutionCap("300 dpi", true, 300, 300, 300));
++
++	// Colors
++	bool color = ColorSpace(true) != kPWGColorSpaceSGray;
++	bool gray = fTypes.Length() == 0 || list_contains(fTypes, "sgray_8");
++	if (color)
++		fColors.push_back(new ColorCap("Color", true, JobData::kColor));
++	if (gray || !color) {
++		fColors.push_back(new ColorCap("Shades of Gray", !color,
++			JobData::kMonochrome));
++	}
++}
++
++
++int32
++PWGCap::ColorSpace(bool color) const
++{
++	if (fTypes.Length() == 0)
++		return color ? kPWGColorSpaceSRGB : kPWGColorSpaceSGray;
++	if (color && list_contains(fTypes, "srgb_8"))
++		return kPWGColorSpaceSRGB;
++	if (color && list_contains(fTypes, "rgb_8"))
++		return kPWGColorSpaceRGB;
++	if (!list_contains(fTypes, "sgray_8") && list_contains(fTypes, "rgb_8"))
++		return kPWGColorSpaceRGB;
++	if (!list_contains(fTypes, "sgray_8") && list_contains(fTypes, "srgb_8"))
++		return kPWGColorSpaceSRGB;
++	return kPWGColorSpaceSGray;
++}
++
++
++const PWGPaperCap*
++PWGCap::FindPaper(JobData::Paper paper) const
++{
++	for (size_t i = 0; i < fPapers.size(); i++) {
++		const PWGPaperCap* cap = static_cast<const PWGPaperCap*>(fPapers[i]);
++		if (cap->fPaper == paper)
++			return cap;
++	}
++	return static_cast<const PWGPaperCap*>(fPapers[0]);
++}
++
++
++int
++PWGCap::CountCap(CapID category) const
++{
++	switch (category) {
++		case kPaper:
++			return fPapers.size();
++		case kPaperSource:
++			return fPaperSources.size();
++		case kResolution:
++			return fResolutions.size();
++		case kColor:
++			return fColors.size();
++		default:
++			return 0;
++	}
++}
++
++
++const BaseCap**
++PWGCap::GetCaps(CapID category) const
++{
++	const std::vector<const BaseCap*>* caps;
++	switch (category) {
++		case kPaper:
++			caps = &fPapers;
++			break;
++		case kPaperSource:
++			caps = &fPaperSources;
++			break;
++		case kResolution:
++			caps = &fResolutions;
++			break;
++		case kColor:
++			caps = &fColors;
++			break;
++		default:
++			return NULL;
++	}
++	return const_cast<const BaseCap**>(caps->data());
++}
++
++
++bool
++PWGCap::Supports(CapID category) const
++{
++	switch (category) {
++		case kPaper:
++		case kPaperSource:
++		case kResolution:
++		case kColor:
++			return true;
++		default:
++			return false;
++	}
++}
+diff --git a/src/add-ons/print/drivers/pwg/PWGCap.h b/src/add-ons/print/drivers/pwg/PWGCap.h
+new file mode 100644
+index 00000000..ee2153ce
+--- /dev/null
++++ b/src/add-ons/print/drivers/pwg/PWGCap.h
+@@ -0,0 +1,75 @@
++/*
++ * Copyright 2026 Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef PWG_CAP_H
++#define PWG_CAP_H
++
++
++#include <String.h>
++
++#include <vector>
++
++#include "PrinterCap.h"
++
++
++// Printer attributes cached on the printer's settings folder. They are read
++// from the printer with an IPP Get-Printer-Attributes request the first time
++// they are needed, and can be set by hand (e.g. with addattr).
++#define PWG_ATTR_RESOLUTIONS	"pwg:resolutions"
++	// "300,600": pwg-raster-document-resolution-supported, in dpi
++#define PWG_ATTR_TYPES			"pwg:types"
++	// "sgray_8,srgb_8": pwg-raster-document-type-supported
++#define PWG_ATTR_MEDIA			"pwg:media"
++	// media-supported, comma separated
++#define PWG_ATTR_MEDIA_DEFAULT	"pwg:media-default"
++#define PWG_ATTR_MODEL			"pwg:make-and-model"
++
++
++enum {
++	// PWG raster color spaces
++	kPWGColorSpaceRGB	= 1,
++	kPWGColorSpaceSGray	= 18,
++	kPWGColorSpaceSRGB	= 19
++};
++
++
++struct PWGPaperCap : public PaperCap {
++							PWGPaperCap(const char* label, bool isDefault,
++								JobData::Paper paper, float width,
++								float height, const char* mediaName);
++
++			BString			fMediaName;
++				// the PWG self-describing media name, e.g.
++				// "na_letter_8.5x11in"
++};
++
++
++class PWGCap : public PrinterCap {
++public:
++							PWGCap(const PrinterData* printerData);
++	virtual					~PWGCap();
++
++	virtual	int				CountCap(CapID category) const;
++	virtual	bool			Supports(CapID category) const;
++	virtual	const BaseCap**	GetCaps(CapID category) const;
++
++			// the PWG raster color space used for color and gray jobs
++			int32			ColorSpace(bool color) const;
++			const PWGPaperCap* FindPaper(JobData::Paper paper) const;
++
++	static	status_t		QueryPrinter(const char* uri, BNode& node,
++								BString& error);
++
++private:
++			void			_Load(BNode& node, bool query);
++
++			std::vector<const BaseCap*>	fPapers;
++			std::vector<const BaseCap*>	fPaperSources;
++			std::vector<const BaseCap*>	fResolutions;
++			std::vector<const BaseCap*>	fColors;
++			BString			fTypes;
++};
++
++
++#endif	// PWG_CAP_H
+diff --git a/src/add-ons/print/drivers/pwg/PWGEntry.cpp b/src/add-ons/print/drivers/pwg/PWGEntry.cpp
+new file mode 100644
+index 00000000..9d691daf
+--- /dev/null
++++ b/src/add-ons/print/drivers/pwg/PWGEntry.cpp
+@@ -0,0 +1,58 @@
++/*
++ * Copyright 2026 Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "PWG.h"
++#include "PWGCap.h"
++#include "PrinterDriver.h"
++
++
++class PWGPrinterDriver : public PrinterDriver {
++public:
++	PWGPrinterDriver(BNode* printerFolder)
++		:
++		PrinterDriver(printerFolder)
++	{
++	}
++
++	const char* GetSignature() const
++	{
++		return "application/x-vnd.ipp-everywhere";
++	}
++
++	const char* GetDriverName() const
++	{
++		return "IPP Everywhere";
++	}
++
++	const char* GetVersion() const
++	{
++		return "1.0";
++	}
++
++	const char* GetCopyright() const
++	{
++		return "IPP Everywhere (PWG Raster) driver Copyright © 2026 "
++			"Haiku, Inc.\n";
++	}
++
++	PrinterCap* InstantiatePrinterCap(PrinterData* printerData)
++	{
++		return new PWGCap(printerData);
++	}
++
++	GraphicsDriver* InstantiateGraphicsDriver(BMessage* settings,
++		PrinterData* printerData, PrinterCap* printerCap)
++	{
++		return new PWGDriver(settings, printerData, printerCap);
++	}
++};
++
++
++PrinterDriver*
++instantiate_printer_driver(BNode* printerFolder)
++{
++	return new PWGPrinterDriver(printerFolder);
++}
+diff --git a/src/add-ons/print/transports/ipp/HttpURLConnection.cpp b/src/add-ons/print/transports/ipp/HttpURLConnection.cpp
+deleted file mode 100644
+index b4c699b4..00000000
+--- a/src/add-ons/print/transports/ipp/HttpURLConnection.cpp
++++ /dev/null
+@@ -1,324 +0,0 @@
+-// Sun, 18 Jun 2000
+-// Y.Takagi
+-
+-#include <list>
+-#include <algorithm>
+-#include <cstring>
+-#include <strings.h>
+-
+-#define stricmp	strcasecmp
+-
+-#include "HttpURLConnection.h"
+-#include "Socket.h"
+-
+-using namespace std;
+-
+-#define DEFAULT_PORT	80;
+-
+-Field::Field(char *field)
+-{
+-	char *p = strtok(field, ": \t\r\n");
+-	key = p ? p : "";
+-	p = strtok(NULL,   " \t\r\n");
+-	value = p ? p : "";
+-}
+-
+-Field::Field(const char *k, const char *v)
+-{
+-	key   = k ? k : "";
+-	value = v ? v : "";
+-}
+-
+-Field::Field(const Field &o)
+-{
+-	key   = o.key;
+-	value = o.value;
+-}
+-
+-Field &Field::operator = (const Field &o)
+-{
+-	key   = o.key;
+-	value = o.value;
+-	return *this;
+-}
+-
+-bool Field::operator == (const Field &o)
+-{
+-	return (key == o.key) && (value == o.value);
+-}
+-
+-HttpURLConnection::HttpURLConnection(const BUrl &Url)
+-	: connected(false), doInput(true), doOutput(false), url(Url)
+-{
+-	__sock     = NULL;
+-	__method   = "GET";
+-	__request  = NULL;
+-	__response = NULL;
+-	__response_code = HTTP_UNKNOWN;
+-}
+-
+-HttpURLConnection::~HttpURLConnection()
+-{
+-	disconnect();
+-
+-	if (__sock) {
+-		delete __sock;
+-	}
+-
+-	if (__request) {
+-		delete __request;
+-	}
+-
+-	if (__response) {
+-		delete __response;
+-	}
+-}
+-
+-void HttpURLConnection::disconnect()
+-{
+-	if (connected) {
+-		connected = false;
+-		__sock->close();
+-	}
+-}
+-
+-const char *HttpURLConnection::getRequestMethod() const
+-{
+-	return __method.c_str();
+-}
+-
+-void HttpURLConnection::setRequestMethod(const char *method)
+-{
+-	__method = method;
+-}
+-
+-void HttpURLConnection::setRequestProperty(const char *key, const char *value)
+-{
+-	if (__request == NULL) {
+-		__request = new Fields;
+-	}
+-	__request->push_back(Field(key, value));
+-}
+-
+-istream &HttpURLConnection::getInputStream()
+-{
+-	if (!connected) {
+-		connect();
+-		setRequest();
+-	}
+-	return __sock->getInputStream();
+-}
+-
+-ostream &HttpURLConnection::getOutputStream()
+-{
+-	if (!connected) {
+-		connect();
+-	}
+-	return __sock->getOutputStream();
+-}
+-
+-void HttpURLConnection::setDoInput(bool doInput)
+-{
+-	this->doInput = doInput;
+-}
+-
+-void HttpURLConnection::setDoOutput(bool doOutput)
+-{
+-	this->doOutput = doOutput;
+-}
+-
+-void HttpURLConnection::connect()
+-{
+-	if (!connected) {
+-		int port = url.Port();
+-		if (port < 0) {
+-			const char *protocol = url.Protocol();
+-			if (!stricmp(protocol, "http")) {
+-				port = DEFAULT_PORT;
+-			} else if (!stricmp(protocol, "ipp")) {
+-				port = 631;
+-			} else {
+-				port = DEFAULT_PORT;
+-			}
+-		}
+-		__sock = new Socket(url.Host(), port);
+-		if (__sock->fail()) {
+-			__error_msg = __sock->getLastError();
+-		} else {
+-			connected = true;
+-		}
+-	}
+-}
+-
+-const char *HttpURLConnection::getContentType()
+-{
+-	return getHeaderField("Content-Type");
+-}
+-
+-const char *HttpURLConnection::getContentEncoding()
+-{
+-	return getHeaderField("Content-Encoding");
+-}
+-
+-int HttpURLConnection::getContentLength()
+-{
+-	const char *p = getHeaderField("Content-Length");
+-	return p ? atoi(p) : -1;
+-}
+-
+-const char *HttpURLConnection::getHeaderField(const char *s)
+-{
+-	if (__response == NULL) {
+-		action();
+-	}
+-	if (__response) {
+-		for (Fields::iterator it = __response->begin(); it != __response->end(); it++) {
+-			if ((*it).key == s) {
+-				return (*it).value.c_str();
+-			}
+-		}
+-	}
+-	return NULL;
+-}
+-
+-HTTP_RESPONSECODE HttpURLConnection::getResponseCode()
+-{
+-	if (__response == NULL) {
+-		action();
+-	}
+-	return __response_code;
+-}
+-
+-const char *HttpURLConnection::getResponseMessage()
+-{
+-	if (__response == NULL) {
+-		action();
+-	}
+-	return __response_message.c_str();
+-}
+-
+-void HttpURLConnection::action()
+-{
+-	if (!connected) {
+-		connect();
+-	}
+-	if (connected) {
+-		setRequest();
+-	}
+-	if (connected) {
+-		getResponse();
+-	}
+-}
+-
+-void HttpURLConnection::setRequest()
+-{
+-	if (connected) {
+-		setRequestProperty("Host", url.Host());
+-		ostream &os = getOutputStream();
+-		os << __method << ' ' << url.Path() << " HTTP/1.1" << '\r' << '\n';
+-		for (Fields::iterator it = __request->begin(); it != __request->end(); it++) {
+-			os << (*it).key << ": " << (*it).value << '\r' << '\n';
+-		}
+-		os << '\r' << '\n';
+-
+-		setContent();
+-
+-		if (!doOutput) {
+-			os.flush();
+-		}
+-
+-		if (__response) {
+-			delete __response;
+-			__response = NULL;
+-		}
+-	}
+-}
+-
+-void HttpURLConnection::setContent()
+-{
+-}
+-
+-void HttpURLConnection::getResponse()
+-{
+-	if (connected) {
+-
+-		if (__response == NULL) {
+-			__response = new Fields;
+-
+-			istream &is = getInputStream();
+-
+-			char buffer[1024];
+-
+-			if (!is.getline(buffer, sizeof(buffer))) {
+-				__error_msg = __sock->getLastError();
+-				return;
+-			}
+-			buffer[is.gcount() - 2] = '\0';
+-			__response_message = buffer;
+-			strtok(buffer, " ");
+-			char *p = strtok(NULL, " ");
+-			__response_code = p ? (HTTP_RESPONSECODE)atoi(p) : HTTP_UNKNOWN;
+-
+-			while (is.getline(buffer, sizeof(buffer))) {
+-				if (buffer[0] == '\r') {
+-					break;
+-				}
+-				buffer[is.gcount() - 2] = '\0';
+-				__response->push_back(Field(buffer));
+-			}
+-
+-			int size = getContentLength();
+-			if (size > 0) {
+-				getContent();
+-			}
+-
+-			if (__response_code != HTTP_CONTINUE) {
+-				const char *s = getHeaderField("Connection");
+-				if (s == NULL) {
+-					connected = false;
+-					__error_msg = "cannot found \"Connection\" field";
+-				} else if (stricmp(s, "Keep-Alive")) {
+-					connected = false;
+-				}
+-			}
+-
+-			switch (__response_code) {
+-			case HTTP_MOVED_TEMP:
+-				{
+-					const char *p = getHeaderField("Location");
+-					if (p) {
+-						BUrl trueUrl(p, true);
+-						url = trueUrl;
+-						delete __response;
+-						__response = NULL;
+-						action();
+-					}
+-				}
+-				break;
+-			case HTTP_CONTINUE:
+-				delete __response;
+-				__response = NULL;
+-				getResponse();
+-				break;
+-			default:
+-				break;
+-			}
+-		}
+-	}
+-}
+-
+-void HttpURLConnection::getContent()
+-{
+-	const int maxBufSize = 1024;
+-	if (connected) {
+-		int size = getContentLength();
+-		if (size > 0) {
+-			istream &is = getInputStream();
+-			int bufsize = min(size, maxBufSize);
+-			char buf[maxBufSize];
+-			while (size > 0 && is.read(buf, bufsize)) {
+-				size -= bufsize;
+-			}
+-		}
+-	}
+-}
+diff --git a/src/add-ons/print/transports/ipp/HttpURLConnection.h b/src/add-ons/print/transports/ipp/HttpURLConnection.h
+deleted file mode 100644
+index bd806eaf..00000000
+--- a/src/add-ons/print/transports/ipp/HttpURLConnection.h
++++ /dev/null
+@@ -1,142 +0,0 @@
+-// Sun, 18 Jun 2000
+-// Y.Takagi
+-
+-#ifndef __HttpURLConnection_H
+-#define __HttpURLConnection_H
+-
+-#include <iostream>
+-
+-#include <list>
+-#include <string>
+-
+-#include <Url.h>
+-
+-using namespace std;
+-
+-class Socket;
+-
+-enum HTTP_RESPONSECODE {
+-	HTTP_UNKNOWN		= -1,	//
+-
+-	HTTP_CONTINUE		= 100,	// Everything OK, keep going...
+-	HTTP_SWITCH_PROC	= 101,	// Switching Protocols
+-
+-	HTTP_OK				= 200,	// OPTIONS/GET/HEAD/POST/TRACE command was successful
+-	HTTP_CREATED,				// PUT command was successful
+-	HTTP_ACCEPTED,				// DELETE command was successful
+-	HTTP_NOT_AUTHORITATIVE,		// Information isn't authoritative
+-	HTTP_NO_CONTENT,			// Successful command, no new data
+-	HTTP_RESET,					// Content was reset/recreated
+-	HTTP_PARTIAL,				// Only a partial file was recieved/sent
+-
+-	HTTP_MULTI_CHOICE	= 300,	// Multiple files match request
+-	HTTP_MOVED_PERM,			// Document has moved permanently
+-	HTTP_MOVED_TEMP,			// Document has moved temporarily
+-	HTTP_SEE_OTHER,				// See this other link...
+-	HTTP_NOT_MODIFIED,			// File not modified
+-	HTTP_USE_PROXY,				// Must use a proxy to access this URI
+-
+-	HTTP_BAD_REQUEST	= 400,	// Bad request
+-	HTTP_UNAUTHORIZED,			// Unauthorized to access host
+-	HTTP_PAYMENT_REQUIRED,		// Payment required
+-	HTTP_FORBIDDEN,				// Forbidden to access this URI
+-	HTTP_NOT_FOUND,				// URI was not found
+-	HTTP_BAD_METHOD,			// Method is not allowed
+-	HTTP_NOT_ACCEPTABLE,		// Not Acceptable
+-	HTTP_PROXY_AUTH,			// Proxy Authentication is Required
+-	HTTP_REQUEST_TIMEOUT,		// Request timed out
+-	HTTP_CONFLICT,				// Request is self-conflicting
+-	HTTP_GONE,					// Server has gone away
+-	HTTP_LENGTH_REQUIRED,		// A content length or encoding is required
+-	HTTP_PRECON_FAILED,			// Precondition failed
+-	HTTP_ENTITY_TOO_LARGE,		// URI too long
+-	HTTP_REQ_TOO_LONG,			// Request entity too large
+-	HTTP_UNSUPPORTED_TYPE,		// The requested media type is unsupported
+-
+-	HTTP_SERVER_ERROR	= 500,	// Internal server error
+-	HTTP_INTERNAL_ERROR,		// Feature not implemented
+-	HTTP_BAD_GATEWAY,			// Bad gateway
+-	HTTP_UNAVAILABLE,			// Service is unavailable
+-	HTTP_GATEWAY_TIMEOUT,		// Gateway connection timed out
+-	HTTP_VERSION				// HTTP version not supported
+-};
+-
+-struct Field {
+-	string key;
+-	string value;
+-	Field() {}
+-	Field(char *field);
+-	Field(const char *k, const char *v);
+-	Field(const Field &);
+-	Field &operator = (const Field &);
+-	bool operator == (const Field &);
+-};
+-
+-typedef list<Field>	Fields;
+-
+-class HttpURLConnection {
+-public:
+-	HttpURLConnection(const BUrl &url);
+-	virtual ~HttpURLConnection();
+-
+-	virtual void connect();
+-	void disconnect();
+-
+-	void setRequestMethod(const char *method);
+-	const char *getRequestMethod() const;
+-	void setRequestProperty(const char *key, const char *value);
+-
+-	const char *getContentType();
+-	const char *getContentEncoding();
+-	int getContentLength();
+-	long getDate();
+-	const char *getHeaderField(int n);
+-	const char *getHeaderField(const char *);
+-	const BUrl &getURL() const;
+-	HTTP_RESPONSECODE getResponseCode();
+-	const char *getResponseMessage();
+-
+-	bool getDoInput() const;
+-	bool getDoOutput() const;
+-	void setDoInput(bool doInput);
+-	void setDoOutput(bool doOutput);
+-
+-	istream &getInputStream();
+-	ostream &getOutputStream();
+-
+-	const char *getLastError() const;
+-	void setLastError(const char *);
+-
+-protected:
+-	bool connected;
+-	bool doInput;
+-	bool doOutput;
+-	BUrl  url;
+-
+-	virtual void action();
+-	virtual void setRequest();
+-	virtual void setContent();
+-	virtual void getResponse();
+-	virtual void getContent();
+-
+-private:
+-	Fields *__request;
+-	Fields *__response;
+-	Socket *__sock;
+-	string __method;
+-	string __response_message;
+-	HTTP_RESPONSECODE __response_code;
+-	string __error_msg;
+-};
+-
+-inline const char *HttpURLConnection::getLastError() const
+-{
+-	return __error_msg.c_str();
+-}
+-
+-inline void HttpURLConnection::setLastError(const char *e)
+-{
+-	__error_msg = e;
+-}
+-
+-#endif	// __HttpURLConnection_H
+diff --git a/src/add-ons/print/transports/ipp/IppContent.cpp b/src/add-ons/print/transports/ipp/IppContent.cpp
+deleted file mode 100644
+index 1becb85a..00000000
+--- a/src/add-ons/print/transports/ipp/IppContent.cpp
++++ /dev/null
+@@ -1,1269 +0,0 @@
+-// Sun, 18 Jun 2000
+-// Y.Takagi
+-
+-#if defined(__HAIKU__) || defined(HAIKU_TARGET_PLATFORM_BONE)
+-#	include <sys/socket.h>
+-#	include <netinet/in.h>
+-#else
+-#	include <net/socket.h>
+-#endif
+-
+-#include <fstream>
+-#include <list>
+-#include <cstring>
+-
+-#include "IppContent.h"
+-
+-/*----------------------------------------------------------------------*/
+-
+-short
+-readLength(istream& is)
+-{
+-	short len = 0;
+-	is.read((char*)&len, sizeof(short));
+-	len = ntohs(len);
+-	return len;
+-}
+-
+-
+-void
+-writeLength(ostream& os, short len)
+-{
+-	len = htons(len);
+-	os.write((char*)&len, sizeof(short));
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-DATETIME::DATETIME()
+-{
+-	memset(this, 0, sizeof(DATETIME));
+-}
+-
+-
+-DATETIME::DATETIME(const DATETIME& dt)
+-{
+-	memcpy(this, &dt.datetime, sizeof(DATETIME));
+-}
+-
+-
+-DATETIME&
+-DATETIME::operator=(const DATETIME& dt)
+-{
+-	memcpy(this, &dt.datetime, sizeof(DATETIME));
+-	return *this;
+-}
+-
+-
+-istream&
+-operator>>(istream& is, DATETIME& attr)
+-{
+-	return is;
+-}
+-
+-
+-ostream&
+-operator<<(ostream& os, const DATETIME& attr)
+-{
+-	return os;
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-IppAttribute::IppAttribute(IPP_TAG _tag)
+-	: tag(_tag)
+-{
+-}
+-
+-
+-int
+-IppAttribute::length() const
+-{
+-	return 1;
+-}
+-
+-
+-istream&
+-IppAttribute::input(istream& is)
+-{
+-	return is;
+-}
+-
+-
+-ostream&
+-IppAttribute::output(ostream& os) const
+-{
+-	os << (unsigned char)tag;
+-	return os;
+-}
+-
+-
+-ostream&
+-IppAttribute::print(ostream& os) const
+-{
+-	os << "Tag: " << hex << (int)tag << '\n';
+-	return os;
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-IppNamedAttribute::IppNamedAttribute(IPP_TAG tag)
+-	: IppAttribute(tag)
+-{
+-}
+-
+-
+-IppNamedAttribute::IppNamedAttribute(IPP_TAG tag, const char* _name)
+-	:
+-	IppAttribute(tag),
+-	name(_name ? _name : "")
+-{
+-}
+-
+-
+-int
+-IppNamedAttribute::length() const
+-{
+-	return IppAttribute::length() + 2 + name.length();
+-}
+-
+-
+-istream&
+-IppNamedAttribute::input(istream& is)
+-{
+-	short len = readLength(is);
+-
+-	if (0 < len) {
+-		char* buffer = new char[len + 1];
+-		is.read(buffer, len);
+-		buffer[len] = '\0';
+-		name = buffer;
+-		delete [] buffer;
+-	}
+-
+-	return is;
+-}
+-
+-
+-ostream&
+-IppNamedAttribute::output(ostream& os) const
+-{
+-	IppAttribute::output(os);
+-
+-	writeLength(os, name.length());
+-	os << name;
+-
+-	return os;
+-}
+-
+-
+-ostream&
+-IppNamedAttribute::print(ostream& os) const
+-{
+-	IppAttribute::print(os);
+-	os << '\t' << "Name: " << name << '\n';
+-	return os;
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-IppNoValueAttribute::IppNoValueAttribute(IPP_TAG t)
+-	: IppNamedAttribute(t)
+-{
+-}
+-
+-
+-IppNoValueAttribute::IppNoValueAttribute(IPP_TAG t, const char* n)
+-	:
+-	IppNamedAttribute(t, n)
+-{
+-}
+-
+-
+-int
+-IppNoValueAttribute::length() const
+-{
+-	return IppAttribute::length() + 2;
+-}
+-
+-
+-istream&
+-IppNoValueAttribute::input(istream& is)
+-{
+-	IppNamedAttribute::input(is);
+-
+-	short len = readLength(is);
+-
+-	if (0 < len) {
+-		is.seekg(len, ios::cur);
+-	}
+-
+-	return is;
+-}
+-
+-
+-ostream&
+-IppNoValueAttribute::output(ostream& os) const
+-{
+-	IppAttribute::output(os);
+-
+-	writeLength(os, 0);
+-
+-	return os;
+-}
+-
+-
+-ostream&
+-IppNoValueAttribute::print(ostream& os) const
+-{
+-	return IppNamedAttribute::print(os);
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-IppIntegerAttribute::IppIntegerAttribute(IPP_TAG t)
+-	: IppNamedAttribute(t), value(0)
+-{
+-}
+-
+-
+-IppIntegerAttribute::IppIntegerAttribute(IPP_TAG t, const char* n, int v)
+-	:
+-	IppNamedAttribute(t, n),
+-	value(v)
+-{
+-}
+-
+-
+-int
+-IppIntegerAttribute::length() const
+-{
+-	return IppNamedAttribute::length() + 2 + 4;
+-}
+-
+-
+-istream&
+-IppIntegerAttribute::input(istream& is)
+-{
+-	IppNamedAttribute::input(is);
+-
+-	short len = readLength(is);
+-
+-	if (0 < len && len <= 4) {
+-		is.read((char*)&value, sizeof(value));
+-		value = ntohl(value);
+-	} else {
+-		is.seekg(len, ios::cur);
+-	}
+-
+-	return is;
+-}
+-
+-
+-ostream&
+-IppIntegerAttribute::output(ostream& os) const
+-{
+-	IppNamedAttribute::output(os);
+-
+-	writeLength(os, 4);
+-	uint32 val = htonl(value);
+-	os.write((char*)&val, sizeof(val));
+-	return os;
+-}
+-
+-
+-ostream&
+-IppIntegerAttribute::print(ostream& os) const
+-{
+-	IppNamedAttribute::print(os);
+-	os << '\t' << "Value: " << dec << value << '\n';
+-	return os;
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-IppBooleanAttribute::IppBooleanAttribute(IPP_TAG t)
+-	: IppNamedAttribute(t), value(false)
+-{
+-}
+-
+-
+-IppBooleanAttribute::IppBooleanAttribute(IPP_TAG t, const char* n, bool f)
+-	:
+-	IppNamedAttribute(t, n),
+-	value(f)
+-{
+-}
+-
+-
+-int
+-IppBooleanAttribute::length() const
+-{
+-	return IppNamedAttribute::length() + 2 + 1;
+-}
+-
+-
+-istream&
+-IppBooleanAttribute::input(istream& is)
+-{
+-	IppNamedAttribute::input(is);
+-
+-	short len = readLength(is);
+-
+-	if (0 < len && len <= 1) {
+-		char c;
+-		is.read((char*)&c, sizeof(c));
+-		value = c ? true : false;
+-	} else {
+-		is.seekg(len, ios::cur);
+-	}
+-
+-	return is;
+-}
+-
+-
+-ostream&
+-IppBooleanAttribute::output(ostream& os) const
+-{
+-	IppNamedAttribute::output(os);
+-
+-	writeLength(os, 1);
+-	char c = (char)value;
+-	os.write((char*)&c, sizeof(c));
+-
+-	return os;
+-}
+-
+-
+-ostream&
+-IppBooleanAttribute::print(ostream& os) const
+-{
+-	IppNamedAttribute::print(os);
+-	os << '\t' << "Value: " << value << '\n';
+-	return os;
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-IppDatetimeAttribute::IppDatetimeAttribute(IPP_TAG t)
+-	: IppNamedAttribute(t)
+-{
+-}
+-
+-
+-IppDatetimeAttribute::IppDatetimeAttribute(IPP_TAG t, const char* n, const DATETIME* dt)
+-	:
+-	IppNamedAttribute(t, n),
+-	datetime(*dt)
+-{
+-}
+-
+-
+-int
+-IppDatetimeAttribute::length() const
+-{
+-	return IppNamedAttribute::length() + 2 + 11;
+-}
+-
+-
+-istream&
+-IppDatetimeAttribute::input(istream& is)
+-{
+-	IppNamedAttribute::input(is);
+-
+-	short len = readLength(is);
+-
+-	if (0 < len) {
+-		if (len == 11) {
+-			is >> datetime;
+-		} else {
+-			is.seekg(len, ios::cur);
+-		}
+-	}
+-
+-	return is;
+-}
+-
+-
+-ostream&
+-IppDatetimeAttribute::output(ostream& os) const
+-{
+-	IppNamedAttribute::output(os);
+-
+-	writeLength(os, 11);
+-	os << datetime;
+-
+-	return os;
+-}
+-
+-
+-ostream&
+-IppDatetimeAttribute::print(ostream& os) const
+-{
+-	IppNamedAttribute::print(os);
+-	os << '\t' << "Value(DateTime): " << datetime << '\n';
+-	return os;
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-IppStringAttribute::IppStringAttribute(IPP_TAG t)
+-	: IppNamedAttribute(t)
+-{
+-}
+-
+-
+-IppStringAttribute::IppStringAttribute(IPP_TAG t, const char* n, const char* s)
+-	:
+-	IppNamedAttribute(t, n),
+-	text(s ? s : "")
+-{
+-}
+-
+-
+-int
+-IppStringAttribute::length() const
+-{
+-	return IppNamedAttribute::length() + 2 + text.length();
+-}
+-
+-
+-istream&
+-IppStringAttribute::input(istream& is)
+-{
+-	IppNamedAttribute::input(is);
+-
+-	short len = readLength(is);
+-
+-	if (0 < len) {
+-		char* buffer = new char[len + 1];
+-		is.read(buffer, len);
+-		buffer[len] = '\0';
+-		text = buffer;
+-		delete [] buffer;
+-	}
+-
+-	return is;
+-}
+-
+-
+-ostream&
+-IppStringAttribute::output(ostream& os) const
+-{
+-	IppNamedAttribute::output(os);
+-
+-	writeLength(os, text.length());
+-	os << text;
+-
+-	return os;
+-}
+-
+-
+-ostream&
+-IppStringAttribute::print(ostream& os) const
+-{
+-	IppNamedAttribute::print(os);
+-	os << '\t' << "Value: " << text << '\n';
+-	return os;
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-IppDoubleStringAttribute::IppDoubleStringAttribute(IPP_TAG t)
+-	: IppNamedAttribute(t)
+-{
+-}
+-
+-
+-IppDoubleStringAttribute::IppDoubleStringAttribute(IPP_TAG t, const char* n, const char* s1,
+-	const char* s2)
+-	:
+-	IppNamedAttribute(t, n),
+-	text1(s1 ? s1 : ""),
+-	text2(s2 ? s2 : "")
+-{
+-}
+-
+-
+-int
+-IppDoubleStringAttribute::length() const
+-{
+-	return IppNamedAttribute::length() + 2 + text1.length() + 2  + text2.length();
+-}
+-
+-
+-istream&
+-IppDoubleStringAttribute::input(istream& is)
+-{
+-	IppNamedAttribute::input(is);
+-
+-	short len = readLength(is);
+-
+-	if (0 < len) {
+-		char* buffer = new char[len + 1];
+-		is.read(buffer, len);
+-		buffer[len] = '\0';
+-		text1 = buffer;
+-		delete [] buffer;
+-	}
+-
+-	len = readLength(is);
+-
+-	if (0 < len) {
+-		char* buffer = new char[len + 1];
+-		is.read(buffer, len);
+-		buffer[len] = '\0';
+-		text2 = buffer;
+-		delete [] buffer;
+-	}
+-
+-	return is;
+-}
+-
+-
+-ostream&
+-IppDoubleStringAttribute::output(ostream& os) const
+-{
+-	IppNamedAttribute::output(os);
+-
+-	writeLength(os, text1.length());
+-	os << text1;
+-
+-	writeLength(os, text2.length());
+-	os << text2;
+-
+-	return os;
+-}
+-
+-
+-ostream&
+-IppDoubleStringAttribute::print(ostream& os) const
+-{
+-	IppNamedAttribute::print(os);
+-	os << '\t' << "Value1: " << text1 << '\n';
+-	os << '\t' << "Value2: " << text2 << '\n';
+-	return os;
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-IppResolutionAttribute::IppResolutionAttribute(IPP_TAG t)
+-	: IppNamedAttribute(t), xres(0), yres(0), resolution_units((IPP_RESOLUTION_UNITS)0)
+-{
+-}
+-
+-
+-IppResolutionAttribute::IppResolutionAttribute(IPP_TAG t, const char* n, int x, int y,
+-	IPP_RESOLUTION_UNITS u)
+-	:
+-	IppNamedAttribute(t, n),
+-	xres(x),
+-	yres(y),
+-	resolution_units(u)
+-{
+-}
+-
+-
+-int
+-IppResolutionAttribute::length() const
+-{
+-	return IppNamedAttribute::length() + 2 + 4 + 2 + 4 + 2 + 1;
+-}
+-
+-
+-istream&
+-IppResolutionAttribute::input(istream& is)
+-{
+-	IppNamedAttribute::input(is);
+-
+-	short len = readLength(is);
+-
+-	if (0 < len && len <= 4) {
+-		is.read((char*)&xres, sizeof(xres));
+-		xres = ntohl(xres);
+-	} else {
+-		is.seekg(len, ios::cur);
+-	}
+-
+-	len = readLength(is);
+-
+-	if (0 < len && len <= 4) {
+-		is.read((char*)&yres, sizeof(yres));
+-		yres = ntohl(yres);
+-	} else {
+-		is.seekg(len, ios::cur);
+-	}
+-
+-	len = readLength(is);
+-
+-	if (len == 1) {
+-		char c;
+-		is.read((char*)&c, sizeof(c));
+-		resolution_units = (IPP_RESOLUTION_UNITS)c;
+-	} else {
+-		is.seekg(len, ios::cur);
+-	}
+-
+-	return is;
+-}
+-
+-
+-ostream&
+-IppResolutionAttribute::output(ostream& os) const
+-{
+-	IppNamedAttribute::output(os);
+-
+-	writeLength(os, 4);
+-	uint32 val = htonl(xres);
+-	os.write((char*)&val, sizeof(val));
+-
+-	writeLength(os, 4);
+-	val = htonl(yres);
+-	os.write((char*)&val, sizeof(val));
+-
+-	writeLength(os, 1);
+-	unsigned char c = (unsigned char)resolution_units;
+-	os.write((char*)&c, sizeof(c));
+-
+-	return os;
+-}
+-
+-
+-ostream&
+-IppResolutionAttribute::print(ostream& os) const
+-{
+-	IppNamedAttribute::print(os);
+-	os << '\t' << "Value(xres): " << dec << xres << '\n';
+-	os << '\t' << "Value(yres): " << dec << yres << '\n';
+-	os << '\t' << "Value(unit): " << dec << resolution_units << '\n';
+-	return os;
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-IppRangeOfIntegerAttribute::IppRangeOfIntegerAttribute(IPP_TAG t)
+-	: IppNamedAttribute(t), lower(0), upper(0)
+-{
+-}
+-
+-
+-IppRangeOfIntegerAttribute::IppRangeOfIntegerAttribute(IPP_TAG t, const char* n, int l, int u)
+-	:
+-	IppNamedAttribute(t, n),
+-	lower(l),
+-	upper(u)
+-{
+-}
+-
+-
+-int
+-IppRangeOfIntegerAttribute::length() const
+-{
+-	return IppNamedAttribute::length() + 2 + 4 + 2 + 4;
+-}
+-
+-
+-istream&
+-IppRangeOfIntegerAttribute::input(istream& is)
+-{
+-	IppNamedAttribute::input(is);
+-
+-	short len = readLength(is);
+-
+-	if (0 < len && len <= 4) {
+-		is.read((char*)&lower, sizeof(lower));
+-		lower = ntohl(lower);
+-	} else {
+-		is.seekg(len, ios::cur);
+-	}
+-
+-	len = readLength(is);
+-
+-	if (0 < len && len <= 4) {
+-		is.read((char*)&upper, sizeof(upper));
+-		upper = ntohl(upper);
+-	} else {
+-		is.seekg(len, ios::cur);
+-	}
+-
+-	return is;
+-}
+-
+-
+-ostream&
+-IppRangeOfIntegerAttribute::output(ostream& os) const
+-{
+-	IppNamedAttribute::output(os);
+-
+-	writeLength(os, 4);
+-	uint32 val = htonl(lower);
+-	os.write((char*)&val, sizeof(val));
+-
+-	writeLength(os, 4);
+-	val = htonl(upper);
+-	os.write((char*)&val, sizeof(val));
+-
+-	return os;
+-}
+-
+-
+-ostream&
+-IppRangeOfIntegerAttribute::print(ostream& os) const
+-{
+-	IppNamedAttribute::print(os);
+-	os << '\t' << "Value(lower): " << dec << lower << '\n';
+-	os << '\t' << "Value(upper): " << dec << upper << '\n';
+-	return os;
+-}
+-
+-
+-// #pragma mark -
+-
+-
+-IppContent::IppContent()
+-{
+-	version      = 0x0100;
+-	operation_id = IPP_GET_PRINTER_ATTRIBUTES;
+-	request_id   = 0x00000001;
+-
+-	is = NULL;
+-	size = -1;
+-}
+-
+-
+-IppContent::~IppContent()
+-{
+-	for (list<IppAttribute*>::const_iterator it = attrs.begin(); it != attrs.end(); it++)
+-		delete (*it);
+-}
+-
+-
+-uint16
+-IppContent::getVersion() const
+-{
+-	return version;
+-}
+-
+-
+-void
+-IppContent::setVersion(uint16 i)
+-{
+-	version = i;
+-}
+-
+-
+-IPP_OPERATION_ID
+-IppContent::getOperationId() const
+-{
+-	return (IPP_OPERATION_ID)operation_id;
+-}
+-
+-
+-void
+-IppContent::setOperationId(IPP_OPERATION_ID i)
+-{
+-	operation_id = i;
+-}
+-
+-
+-IPP_STATUS_CODE
+-IppContent::getStatusCode() const
+-{
+-	return (IPP_STATUS_CODE)operation_id;
+-}
+-
+-
+-uint32
+-IppContent::getRequestId() const
+-{
+-	return request_id;
+-}
+-
+-
+-void
+-IppContent::setRequestId(uint32 i)
+-{
+-	request_id = i;
+-}
+-
+-
+-istream&
+-IppContent::input(istream& is)
+-{
+-	if (!is.read((char*)&version, sizeof(version)))
+-		return is;
+-
+-	version = ntohs(version);
+-
+-	if (!is.read((char*)&operation_id, sizeof(operation_id)))
+-		return is;
+-
+-	operation_id = ntohs(operation_id);
+-
+-	if (!is.read((char*)&request_id, sizeof(request_id)))
+-		return is;
+-
+-	request_id = ntohl(request_id);
+-	char tag;
+-
+-	while (1) {
+-
+-		if (!is.read((char*)&tag, sizeof(tag)))
+-			return is;
+-
+-		if (tag <= 0x0F) {	// delimiter
+-
+-//			case IPP_OPERATION_ATTRIBUTES_TAG:
+-//			case IPP_JOB_ATTRIBUTES_TAG:
+-//			case IPP_END_OF_ATTRIBUTES_TAG:
+-//			case IPP_PRINTER_ATTRIBUTES_TAG:
+-//			case IPP_UNSUPPORTED_ATTRIBUTES_TAG:
+-
+-			attrs.push_back(new IppAttribute((IPP_TAG)tag));
+-			if (tag == IPP_END_OF_ATTRIBUTES_TAG) {
+-				break;
+-			}
+-
+-		} else if (tag <= 0x1F) {
+-
+-			IppNoValueAttribute* attr = new IppNoValueAttribute((IPP_TAG)tag);
+-			is >> *attr;
+-			attrs.push_back(attr);
+-
+-		} else if (tag <= 0x2F) {	// integer values
+-
+-			switch (tag) {
+-			case IPP_INTEGER:
+-			case IPP_ENUM:
+-				{
+-					IppIntegerAttribute* attr = new IppIntegerAttribute((IPP_TAG)tag);
+-					is >> *attr;
+-					attrs.push_back(attr);
+-				}
+-				break;
+-			case IPP_BOOLEAN:
+-				{
+-					IppBooleanAttribute* attr = new IppBooleanAttribute((IPP_TAG)tag);
+-					is >> *attr;
+-					attrs.push_back(attr);
+-				}
+-				break;
+-			default:
+-				{
+-					short len = readLength(is);
+-					is.seekg(len, ios::cur);
+-					len = readLength(is);
+-					is.seekg(len, ios::cur);
+-				}
+-				break;
+-			}
+-
+-		} else if (tag <= 0x3F) {	// octetString values
+-
+-			switch (tag) {
+-			case IPP_STRING:
+-				{
+-					IppStringAttribute* attr = new IppStringAttribute((IPP_TAG)tag);
+-					is >> *attr;
+-					attrs.push_back(attr);
+-				}
+-				break;
+-			case IPP_DATETIME:
+-				{
+-					IppDatetimeAttribute* attr = new IppDatetimeAttribute((IPP_TAG)tag);
+-					is >> *attr;
+-					attrs.push_back(attr);
+-				}
+-				break;
+-			case IPP_RESOLUTION:
+-				{
+-					IppResolutionAttribute* attr = new IppResolutionAttribute((IPP_TAG)tag);
+-					is >> *attr;
+-					attrs.push_back(attr);
+-				}
+-				break;
+-			case IPP_RANGE_OF_INTEGER:
+-				{
+-					IppRangeOfIntegerAttribute* attr = new IppRangeOfIntegerAttribute((IPP_TAG)tag);
+-					is >> *attr;
+-					attrs.push_back(attr);
+-				}
+-				break;
+-			case IPP_TEXT_WITH_LANGUAGE:
+-			case IPP_NAME_WITH_LANGUAGE:
+-				{
+-					IppDoubleStringAttribute* attr = new IppDoubleStringAttribute((IPP_TAG)tag);
+-					is >> *attr;
+-					attrs.push_back(attr);
+-				}
+-				break;
+-			default:
+-				{
+-					short len = readLength(is);
+-					is.seekg(len, ios::cur);
+-					len = readLength(is);
+-					is.seekg(len, ios::cur);
+-				}
+-				break;
+-			}
+-
+-		} else if (tag <= 0x5F) {	// character-string values
+-
+-//			case IPP_TEXT_WITHOUT_LANGUAGE:
+-//			case IPP_NAME_WITHOUT_LANGUAGE:
+-//			case IPP_KEYWORD:
+-//			case IPP_URI:
+-//			case IPP_URISCHEME:
+-//			case IPP_CHARSET:
+-//			case IPP_NATURAL_LANGUAGE:
+-//			case IPP_MIME_MEDIA_TYPE:
+-
+-			IppStringAttribute* attr = new IppStringAttribute((IPP_TAG)tag);
+-			is >> *attr;
+-			attrs.push_back(attr);
+-		}
+-	}
+-	return is;
+-}
+-
+-
+-ostream&
+-IppContent::output(ostream& os) const
+-{
+-	// version-number
+-	uint16 ns_version = htons(version);
+-	os.write((char*)&ns_version, sizeof(ns_version));
+-
+-	// operation-id
+-	uint16 ns_operation_id = htons(operation_id);
+-	os.write((char*)&ns_operation_id, sizeof(ns_operation_id));
+-
+-	// request-id
+-	uint32 ns_request_id = htonl(request_id);
+-	os.write((char*)&ns_request_id, sizeof(ns_request_id));
+-
+-	for (list<IppAttribute*>::const_iterator it = attrs.begin(); it != attrs.end(); it++)
+-		os << *(*it);
+-
+-	ifstream ifs;
+-	istream* iss = is;
+-	if (iss == NULL) {
+-		if (!file_path.empty()) {
+-			ifs.open(file_path.c_str(), ios::in | ios::binary);
+-			iss = &ifs;
+-		}
+-	}
+-	if (iss && iss->good()) {
+-		if (iss->good()) {
+-			char c;
+-			while (iss->get(c)) {
+-				os.put(c);
+-			}
+-		}
+-	}
+-
+-	return os;
+-}
+-
+-
+-void
+-IppContent::setDelimiter(IPP_TAG tag)
+-{
+-	attrs.push_back(new IppAttribute(tag));
+-}
+-
+-
+-void
+-IppContent::setInteger(const char* name, int value)
+-{
+-	attrs.push_back(new IppIntegerAttribute(IPP_INTEGER, name, value));
+-}
+-
+-
+-void
+-IppContent::setBoolean(const char* name, bool value)
+-{
+-	attrs.push_back(new IppBooleanAttribute(IPP_BOOLEAN, name, value));
+-}
+-
+-
+-void
+-IppContent::setString(const char* name, const char* value)
+-{
+-	attrs.push_back(new IppStringAttribute(IPP_STRING, name, value));
+-}
+-
+-
+-void
+-IppContent::setDateTime(const char* name, const DATETIME* dt)
+-{
+-	attrs.push_back(new IppDatetimeAttribute(IPP_DATETIME, name, dt));
+-}
+-
+-
+-void
+-IppContent::setResolution(const char* name, int x, int y, IPP_RESOLUTION_UNITS u)
+-{
+-	attrs.push_back(new IppResolutionAttribute(IPP_RESOLUTION, name, x, y, u));
+-}
+-
+-
+-void
+-IppContent::setRangeOfInteger(const char* name, int lower, int upper)
+-{
+-	attrs.push_back(new IppRangeOfIntegerAttribute(IPP_RANGE_OF_INTEGER, name, lower, upper));
+-}
+-
+-
+-void
+-IppContent::setTextWithLanguage(const char* name, const char* s1, const char* s2)
+-{
+-	attrs.push_back(new IppDoubleStringAttribute(IPP_TEXT_WITH_LANGUAGE, name, s1, s2));
+-}
+-
+-
+-void
+-IppContent::setNameWithLanguage(const char* name, const char* s1, const char* s2)
+-{
+-	attrs.push_back(new IppDoubleStringAttribute(IPP_NAME_WITH_LANGUAGE, name, s1, s2));
+-}
+-
+-
+-void
+-IppContent::setTextWithoutLanguage(const char* name, const char* value)
+-{
+-	attrs.push_back(new IppStringAttribute(IPP_TEXT_WITHOUT_LANGUAGE, name, value));
+-}
+-
+-
+-void
+-IppContent::setNameWithoutLanguage(const char* name, const char* value)
+-{
+-	attrs.push_back(new IppStringAttribute(IPP_NAME_WITHOUT_LANGUAGE, name, value));
+-}
+-
+-
+-void
+-IppContent::setKeyword(const char* name, const char* value)
+-{
+-	attrs.push_back(new IppStringAttribute(IPP_KEYWORD, name, value));
+-}
+-
+-
+-void
+-IppContent::setURI(const char* name, const char* value)
+-{
+-	attrs.push_back(new IppStringAttribute(IPP_URI, name, value));
+-}
+-
+-
+-void
+-IppContent::setURIScheme(const char* name, const char* value)
+-{
+-	attrs.push_back(new IppStringAttribute(IPP_URISCHEME, name, value));
+-}
+-
+-
+-void
+-IppContent::setCharset(const char* name, const char* value)
+-{
+-	attrs.push_back(new IppStringAttribute(IPP_CHARSET, name, value));
+-}
+-
+-
+-void
+-IppContent::setNaturalLanguage(const char* name, const char* value)
+-{
+-	attrs.push_back(new IppStringAttribute(IPP_NATURAL_LANGUAGE, name, value));
+-}
+-
+-
+-void
+-IppContent::setMimeMediaType(const char* name, const char* value)
+-{
+-	attrs.push_back(new IppStringAttribute(IPP_MIME_MEDIA_TYPE, name, value));
+-}
+-
+-
+-int
+-IppContent::length() const
+-{
+-	int length = 8;	// sizeof(version-number + operation-id + request-id)
+-
+-	for (list<IppAttribute*>::const_iterator it = attrs.begin(); it != attrs.end(); it++)
+-		length += (*it)->length();
+-
+-	ifstream ifs;
+-	istream* iss = is;
+-	if (iss == NULL) {
+-		if (!file_path.empty()) {
+-			ifs.open(file_path.c_str(), ios::in | ios::binary);
+-			iss = &ifs;
+-		}
+-	}
+-	if (iss && iss->good()) {
+-		int fsize = size;
+-		if (fsize < 0) {
+-			streampos pos = iss->tellg();
+-			iss->seekg(0, ios::end);
+-			fsize = iss->tellg();
+-			iss->seekg(pos, ios::beg);
+-		}
+-		if (fsize > 0) {
+-			length += fsize;
+-		}
+-	}
+-
+-	return length;
+-}
+-
+-
+-void
+-IppContent::setRawData(const char* file, int n)
+-{
+-	file_path = file;
+-	size = n;
+-}
+-
+-
+-void
+-IppContent::setRawData(istream& ifs, int n)
+-{
+-	is = &ifs;
+-	size = n;
+-}
+-
+-
+-ostream&
+-IppContent::print(ostream& os) const
+-{
+-	os << "version:      " << hex << version << '\n';
+-	os << "operation_id: " << hex << operation_id << '\n';
+-	os << "request_id:   " << hex << request_id << '\n';
+-
+-	for (list<IppAttribute*>::const_iterator it = attrs.begin(); it != attrs.end(); it++)
+-		(*it)->print(os);
+-
+-	return os;
+-}
+-
+-
+-bool
+-IppContent::fail() const
+-{
+-	return !good();
+-}
+-
+-
+-bool
+-IppContent::good() const
+-{
+-	return /*operation_id >= IPP_SUCCESSFUL_OK_S &&*/ operation_id <= IPP_SUCCESSFUL_OK_E;
+-}
+-
+-
+-bool
+-IppContent::operator!() const
+-{
+-	return fail();
+-}
+-
+-
+-const char*
+-IppContent::getStatusMessage() const
+-{
+-	if (good()) {
+-		switch (operation_id) {
+-		case IPP_SUCCESSFUL_OK:
+-			return "successful-ok";
+-		case IPP_SUCCESSFUL_OK_IGNORED_OR_SUBSTITUTED_ATTRIBUTES:
+-			return "successful-ok-ignored-or-substituted-attributes";
+-		case IPP_SUCCESSFUL_OK_CONFLICTING_ATTRIBUTES:
+-			return "successful-ok-conflicting-attributes";
+-		default:
+-			return "successful-ok-???";
+-		}
+-	} else if (IPP_CLIENT_ERROR_S <= operation_id && operation_id <= IPP_CLIENT_ERROR_E) {
+-		switch (operation_id) {
+-		case IPP_CLIENT_ERROR_BAD_REQUEST:
+-			return "client-error-bad-request";
+-		case IPP_CLIENT_ERROR_FORBIDDEN:
+-			return "client-error-forbidden";
+-		case IPP_CLIENT_ERROR_NOT_AUTHENTICATED:
+-			return "client-error-not-authenticated";
+-		case IPP_CLIENT_ERROR_NOT_AUTHORIZED:
+-			return "client-error-not-authorized";
+-		case IPP_CLIENT_ERROR_NOT_POSSIBLE:
+-			return "client-error-not-possible";
+-		case IPP_CLIENT_ERROR_TIMEOUT:
+-			return "client-error-timeout";
+-		case IPP_CLIENT_ERROR_NOT_FOUND:
+-			return "client-error-not-found";
+-		case IPP_CLIENT_ERROR_GONE:
+-			return "client-error-gone";
+-		case IPP_CLIENT_ERROR_REQUEST_ENTITY_TOO_LARGE:
+-			return "client-error-request-entity-too-large";
+-		case IPP_CLIENT_ERROR_REQUEST_VALUE_TOO_LONG:
+-			return "client-error-request-value-too-long";
+-		case IPP_CLIENT_ERROR_DOCUMENT_FORMAT_NOT_SUPPORTED:
+-			return "client-error-document-format-not-supported";
+-		case IPP_CLIENT_ERROR_ATTRIBUTES_OR_VALUES_NOT_SUPPORTED:
+-			return "client-error-attributes-or-values-not-supported";
+-		case IPP_CLIENT_ERROR_URI_SCHEME_NOT_SUPPORTED:
+-			return "client-error-uri-scheme-not-supported";
+-		case IPP_CLIENT_ERROR_CHARSET_NOT_SUPPORTED:
+-			return "client-error-charset-not-supported";
+-		case IPP_CLIENT_ERROR_CONFLICTING_ATTRIBUTES:
+-			return "client-error-conflicting-attributes";
+-		default:
+-			return "client-error-???";
+-		}
+-	} else if (IPP_SERVER_ERROR_S <= operation_id && operation_id <= IPP_SERVER_ERROR_E) {
+-		switch (operation_id) {
+-		case IPP_SERVER_ERROR_INTERNAL_ERROR:
+-			return "server-error-internal-error";
+-		case IPP_SERVER_ERROR_OPERATION_NOT_SUPPORTED:
+-			return "server-error-operation-not-supported";
+-		case IPP_SERVER_ERROR_SERVICE_UNAVAILABLE:
+-			return "server-error-service-unavailable";
+-		case IPP_SERVER_ERROR_VERSION_NOT_SUPPORTED:
+-			return "server-error-version-not-supported";
+-		case IPP_SERVER_ERROR_DEVICE_ERROR:
+-			return "server-error-device-error";
+-		case IPP_SERVER_ERROR_TEMPORARY_ERROR:
+-			return "server-error-temporary-error";
+-		case IPP_SERVER_ERROR_NOT_ACCEPTING_JOBS:
+-			return "server-error-not-accepting-jobs";
+-		case IPP_SERVER_ERROR_BUSY:
+-			return "server-error-busy";
+-		case IPP_SERVER_ERROR_JOB_CANCELED:
+-			return "server-error-job-canceled";
+-		default:
+-			return "server-error-???";
+-		}
+-	} else {
+-		return "unknown error.";
+-	}
+-}
+diff --git a/src/add-ons/print/transports/ipp/IppContent.h b/src/add-ons/print/transports/ipp/IppContent.h
+deleted file mode 100644
+index aec5145c..00000000
+--- a/src/add-ons/print/transports/ipp/IppContent.h
++++ /dev/null
+@@ -1,451 +0,0 @@
+-// Sun, 18 Jun 2000
+-// Y.Takagi
+-
+-#ifndef __IppContent_H
+-#define __IppContent_H
+-
+-#include <iostream>
+-#include <list>
+-#include <string>
+-
+-#include <SupportDefs.h>
+-
+-#if (!__MWERKS__)
+-using namespace std;
+-#else 
+-#define std
+-#endif
+-
+-enum IPP_OPERATION_ID {
+-
+-	/* reserved, not used: 0x0000 */
+-	/* reserved, not used: 0x0001 */
+-
+-	IPP_PRINT_JOB				= 0x0002,	// printer operation
+-	IPP_PRINT_URI				= 0x0003,	// printer operation
+-	IPP_VALIDATE_JOB			= 0x0004,	// printer operation
+-	IPP_CREATE_JOB				= 0x0005,	// printer operation
+-
+-	IPP_SEND_DOCUMENT			= 0x0006,	// job operation
+-	IPP_SEND_URI				= 0x0007,	// job operation
+-	IPP_CANCEL_JOB				= 0x0008,	// job operation
+-	IPP_GET_JOB_ATTRIBUTES		= 0x0009,	// job operation
+-
+-	IPP_GET_JOBS				= 0x000A,	// printer operation
+-	IPP_GET_PRINTER_ATTRIBUTES	= 0x000B	// printer operation
+-
+-	/* reserved for future operations: 0x000C-0x3FFF */
+-	/* reserved for private extensions: 0x4000-0x8FFF */
+-};
+-
+-enum IPP_STATUS_CODE {
+-
+-	IPP_SUCCESSFUL_OK_S									= 0x0000,	// successful
+-	IPP_SUCCESSFUL_OK									= 0x0000,	// successful
+-	IPP_SUCCESSFUL_OK_IGNORED_OR_SUBSTITUTED_ATTRIBUTES	= 0x0001,	// successful
+-	IPP_SUCCESSFUL_OK_CONFLICTING_ATTRIBUTES			= 0x0002,	// successful
+-	IPP_SUCCESSFUL_OK_E									= 0x00FF,	// successful
+-
+-	IPP_INFORMATIONAL_S									= 0x0100,	// informational
+-	IPP_INFORMATIONAL_E									= 0x01FF,	// informational
+-
+-	IPP_REDIRECTION_S									= 0x0200,	// redirection
+-	IPP_REDIRECTION_SE									= 0x02FF,	// redirection
+-
+-	IPP_CLIENT_ERROR_S									= 0x0400,	// client-error
+-	IPP_CLIENT_ERROR_BAD_REQUEST						= 0x0400,	// client-error
+-	IPP_CLIENT_ERROR_FORBIDDEN							= 0x0401,	// client-error
+-	IPP_CLIENT_ERROR_NOT_AUTHENTICATED					= 0x0402,	// client-error
+-	IPP_CLIENT_ERROR_NOT_AUTHORIZED						= 0x0403,	// client-error
+-	IPP_CLIENT_ERROR_NOT_POSSIBLE						= 0x0404,	// client-error
+-	IPP_CLIENT_ERROR_TIMEOUT							= 0x0405,	// client-error
+-	IPP_CLIENT_ERROR_NOT_FOUND							= 0x0406,	// client-error
+-	IPP_CLIENT_ERROR_GONE								= 0x0407,	// client-error
+-	IPP_CLIENT_ERROR_REQUEST_ENTITY_TOO_LARGE			= 0x0408,	// client-error
+-	IPP_CLIENT_ERROR_REQUEST_VALUE_TOO_LONG				= 0x0409,	// client-error
+-	IPP_CLIENT_ERROR_DOCUMENT_FORMAT_NOT_SUPPORTED		= 0x040A,	// client-error
+-	IPP_CLIENT_ERROR_ATTRIBUTES_OR_VALUES_NOT_SUPPORTED	= 0x040B,	// client-error
+-	IPP_CLIENT_ERROR_URI_SCHEME_NOT_SUPPORTED			= 0x040C,	// client-error
+-	IPP_CLIENT_ERROR_CHARSET_NOT_SUPPORTED				= 0x040D,	// client-error
+-	IPP_CLIENT_ERROR_CONFLICTING_ATTRIBUTES				= 0x040E,	// client-error
+-	IPP_CLIENT_ERROR_E									= 0x04FF,	// client-error
+-
+-	IPP_SERVER_ERROR_S									= 0x0500,	// server-error
+-	IPP_SERVER_ERROR_INTERNAL_ERROR						= 0x0500,	// server-error
+-	IPP_SERVER_ERROR_OPERATION_NOT_SUPPORTED			= 0x0501,	// server-error
+-	IPP_SERVER_ERROR_SERVICE_UNAVAILABLE				= 0x0502,	// server-error
+-	IPP_SERVER_ERROR_VERSION_NOT_SUPPORTED				= 0x0503,	// server-error
+-	IPP_SERVER_ERROR_DEVICE_ERROR						= 0x0504,	// server-error
+-	IPP_SERVER_ERROR_TEMPORARY_ERROR					= 0x0505,	// server-error
+-	IPP_SERVER_ERROR_NOT_ACCEPTING_JOBS					= 0x0506,	// server-error
+-	IPP_SERVER_ERROR_BUSY								= 0x0507,	// server-error
+-	IPP_SERVER_ERROR_JOB_CANCELED						= 0x0508,	// server-error
+-	IPP_SERVER_ERROR_E									= 0x05FF	// server-error
+-};
+-
+-enum IPP_TAG {
+-	/* reserved: 0x00 */
+-	IPP_OPERATION_ATTRIBUTES_TAG	= 0x01,
+-	IPP_JOB_ATTRIBUTES_TAG			= 0x02,
+-	IPP_END_OF_ATTRIBUTES_TAG		= 0x03,
+-	IPP_PRINTER_ATTRIBUTES_TAG		= 0x04,
+-	IPP_UNSUPPORTED_ATTRIBUTES_TAG	= 0x05,
+-	/* reserved for future delimiters: 0x06-0x0e */
+-	/* reserved for future chunking-end-of-attributes-tag: 0x0F */
+-
+-	IPP_UNSUPPORTED					= 0x10,
+-	/* reserved for future 'default': 0x11 */
+-	IPP_UNKNOWN						= 0x12,
+-	IPP_NO_VALUE					= 0x13,
+-	/* reserved for future "out-of-band" values: 0x14-0x1F */
+-	/* reserved: 0x20 */
+-	IPP_INTEGER						= 0x21,
+-	IPP_BOOLEAN						= 0x22,
+-	IPP_ENUM						= 0x23,
+-	/* reserved for future integer types: 0x24-0x2F */
+-	IPP_STRING						= 0x30,
+-	IPP_DATETIME					= 0x31,
+-	IPP_RESOLUTION					= 0x32,
+-	IPP_RANGE_OF_INTEGER			= 0x33,
+-	/* reserved for collection (in the future): 0x34 */
+-	IPP_TEXT_WITH_LANGUAGE			= 0x35,
+-	IPP_NAME_WITH_LANGUAGE			= 0x36,
+-	/* reserved for future octetString types: 0x37-0x3F */
+-	/* reserved: 0x40 */
+-	IPP_TEXT_WITHOUT_LANGUAGE		= 0x41,
+-	IPP_NAME_WITHOUT_LANGUAGE		= 0x42,
+-	/* reserved: 0x43 */
+-	IPP_KEYWORD						= 0x44,
+-	IPP_URI							= 0x45,
+-	IPP_URISCHEME					= 0x46,
+-	IPP_CHARSET						= 0x47,
+-	IPP_NATURAL_LANGUAGE			= 0x48,
+-	IPP_MIME_MEDIA_TYPE				= 0x49
+-	/* reserved for future character string types: 0x4A-0x5F */
+-};
+-
+-enum IPP_RESOLUTION_UNITS {
+-	IPP_DOTS_PER_INCH		= 3,
+-	IPP_DOTS_PER_CENTIMETER	= 4
+-};
+-
+-enum IPP_FINISHINGS {
+-	IPP_NONE	= 3,
+-	IPP_STAPLE	= 4,
+-	IPP_PUNCH	= 5,
+-	IPP_COVER	= 6,
+-	IPP_BIND	= 7
+-};
+-
+-enum IPP_ORIENTATION_REQUESTED {
+-	IPP_PORTRAIT			= 3,
+-	IPP_LANDSCAPE			= 4,
+-	IPP_REVERSE_LANDSCAPE	= 5,
+-	IPP_REVERSE_PORTRAIT	= 6
+-};
+-
+-enum IPP_PRINT_QUALITY {
+-	IPP_DRAFT	= 3,
+-	IPP_NORMAL	= 4,
+-	IPP_HIGH	= 5
+-};
+-
+-enum IPP_JOB_STATE {
+-	IPP_JOB_STATE_PENDING			= 3,
+-	IPP_JOB_STATE_PENDING_HELD		= 4,
+-	IPP_JOB_STATE_PROCESSING		= 5,
+-	IPP_JOB_STATE_PROCESSING_STOPPED= 6,
+-	IPP_JOB_STATE_CANCELED			= 7,
+-	IPP_JOB_STATE_ABORTED			= 8,
+-	IPP_JOB_STATE_COMPLETED			= 9
+-};
+-
+-enum IPP_PRINTER_STATE {
+-	IPP_PRINTER_STATEIDLE		= 3,
+-	IPP_PRINTER_STATEPROCESSING	= 4,
+-	IPP_PRINTER_STATESTOPPED	= 5
+-};
+-
+-
+-class IppAttribute {
+-public:
+-	IppAttribute(IPP_TAG);
+-	virtual ~IppAttribute() {}
+-	virtual int length() const;
+-	virtual istream &input(istream &is);
+-	virtual ostream &output(ostream &os) const;
+-	virtual ostream &print(ostream &) const;
+-	friend istream& operator >> (istream &is, IppAttribute &attr)
+-	{
+-		return attr.input(is);
+-	}
+-	friend ostream& operator << (ostream &os, const IppAttribute &attr)
+-	{
+-		return attr.output(os);
+-	}
+-
+-	IPP_TAG tag;
+-};
+-
+-class IppNamedAttribute : public IppAttribute {
+-public:
+-	IppNamedAttribute(IPP_TAG t);
+-	IppNamedAttribute(IPP_TAG t, const char *n);
+-	virtual ~IppNamedAttribute() {}
+-	virtual int length() const;
+-	virtual istream &input(istream &is);
+-	virtual ostream &output(ostream &os) const;
+-	string name;
+-	friend istream& operator >> (istream &is, IppNamedAttribute &attr)
+-	{
+-		return attr.input(is);
+-	}
+-	friend ostream& operator << (ostream &os, const IppNamedAttribute &attr)
+-	{
+-		return attr.output(os);
+-	}
+-	virtual ostream &print(ostream &) const;
+-};
+-
+-class IppNoValueAttribute : public IppNamedAttribute {
+-public:
+-	IppNoValueAttribute(IPP_TAG t);
+-	IppNoValueAttribute(IPP_TAG t, const char *n);
+-	virtual ~IppNoValueAttribute() {}
+-	virtual int length() const;
+-	virtual istream &input(istream &is);
+-	virtual ostream &output(ostream &os) const;
+-	virtual ostream &print(ostream &) const;
+-	friend istream& operator >> (istream &is, IppNoValueAttribute &attr)
+-	{
+-		return attr.input(is);
+-	}
+-	friend ostream& operator << (ostream &os, const IppNoValueAttribute &attr)
+-	{
+-		return attr.output(os);
+-	}
+-};
+-
+-class IppBooleanAttribute : public IppNamedAttribute {
+-public:
+-	IppBooleanAttribute(IPP_TAG t);
+-	IppBooleanAttribute(IPP_TAG t, const char *n, bool f);
+-	virtual ~IppBooleanAttribute() {}
+-	virtual int length() const;
+-	virtual istream &input(istream &is);
+-	virtual ostream &output(ostream &os) const;
+-	virtual ostream &print(ostream &) const;
+-	friend istream& operator >> (istream &is, IppBooleanAttribute &attr)
+-	{
+-		return attr.input(is);
+-	}
+-	friend ostream& operator << (ostream &os, const IppBooleanAttribute &attr)
+-	{
+-		return attr.output(os);
+-	}
+-
+-	bool value;
+-};
+-
+-class IppIntegerAttribute : public IppNamedAttribute {
+-public:
+-	IppIntegerAttribute(IPP_TAG t);
+-	IppIntegerAttribute(IPP_TAG t, const char *n, int v);
+-	virtual ~IppIntegerAttribute() {}
+-	virtual int length() const;
+-	virtual istream &input(istream &is);
+-	virtual ostream &output(ostream &os) const;
+-	virtual ostream &print(ostream &) const;
+-	friend istream& operator >> (istream &is, IppIntegerAttribute &attr)
+-	{
+-		return attr.input(is);
+-	}
+-	friend ostream& operator << (ostream &os, const IppIntegerAttribute &attr)
+-	{
+-		return attr.output(os);
+-	}
+-
+-	long value;
+-};
+-
+-class DATETIME {
+-public:
+-	DATETIME();
+-	DATETIME(const DATETIME &);
+-	DATETIME & operator = (const DATETIME &);
+-	friend istream& operator >> (istream &is, DATETIME &attr);
+-	friend ostream& operator << (ostream &os, const DATETIME &attr);
+-
+-	unsigned char datetime[11];
+-};
+-
+-class IppDatetimeAttribute : public IppNamedAttribute {
+-public:
+-	IppDatetimeAttribute(IPP_TAG t);
+-	IppDatetimeAttribute(IPP_TAG t, const char *n, const DATETIME *dt);
+-	virtual ~IppDatetimeAttribute() {}
+-	virtual int length() const;
+-	virtual istream &input(istream &is);
+-	virtual ostream &output(ostream &os) const;
+-	virtual ostream &print(ostream &) const;
+-	friend istream& operator >> (istream &is, IppDatetimeAttribute &attr)
+-	{
+-		return attr.input(is);
+-	}
+-	friend ostream& operator << (ostream &os, const IppDatetimeAttribute &attr)
+-	{
+-		return attr.output(os);
+-	}
+-
+-	DATETIME datetime;
+-};
+-
+-class IppStringAttribute : public IppNamedAttribute {
+-public:
+-	IppStringAttribute(IPP_TAG t);
+-	IppStringAttribute(IPP_TAG t, const char *s, const char *s1);
+-	virtual ~IppStringAttribute() {}
+-	virtual int length() const;
+-	virtual istream &input(istream &is);
+-	virtual ostream &output(ostream &os) const;
+-	virtual ostream &print(ostream &) const;
+-	friend istream& operator >> (istream &is, IppStringAttribute &attr)
+-	{
+-		return attr.input(is);
+-	}
+-	friend ostream& operator << (ostream &os, const IppStringAttribute &attr)
+-	{
+-		return attr.output(os);
+-	}
+-
+-	string text;
+-};
+-
+-class IppDoubleStringAttribute : public IppNamedAttribute {
+-public:
+-	IppDoubleStringAttribute(IPP_TAG t);
+-	IppDoubleStringAttribute(IPP_TAG t, const char *n, const char *s1, const char *s2);
+-	virtual ~IppDoubleStringAttribute() {}
+-	virtual int length() const;
+-	virtual istream &input(istream &is);
+-	virtual ostream &output(ostream &os) const;
+-	friend istream& operator >> (istream &is, IppDoubleStringAttribute &attr)
+-	{
+-		return attr.input(is);
+-	}
+-	friend ostream& operator << (ostream &os, const IppDoubleStringAttribute &attr)
+-	{
+-		return attr.output(os);
+-	}
+-	virtual ostream &print(ostream &) const;
+-
+-	string text1;
+-	string text2;
+-};
+-
+-class IppResolutionAttribute : public IppNamedAttribute {
+-public:
+-	IppResolutionAttribute(IPP_TAG t);
+-	IppResolutionAttribute(IPP_TAG t, const char *n, int, int, IPP_RESOLUTION_UNITS);
+-	virtual ~IppResolutionAttribute() {}
+-	virtual int length() const;
+-	virtual istream &input(istream &is);
+-	virtual ostream &output(ostream &os) const;
+-	virtual ostream &print(ostream &) const;
+-	friend istream& operator >> (istream &is, IppResolutionAttribute &attr)
+-	{
+-		return attr.input(is);
+-	}
+-	friend ostream& operator << (ostream &os, const IppResolutionAttribute &attr)
+-	{
+-		return attr.output(os);
+-	}
+-
+-	int xres;
+-	int yres;
+-	IPP_RESOLUTION_UNITS resolution_units;
+-};
+-
+-class IppRangeOfIntegerAttribute : public IppNamedAttribute {
+-public:
+-	IppRangeOfIntegerAttribute(IPP_TAG t);
+-	IppRangeOfIntegerAttribute(IPP_TAG t, const char *n, int, int);
+-	virtual ~IppRangeOfIntegerAttribute() {}
+-	virtual int length() const;
+-	virtual istream &input(istream &is);
+-	virtual ostream &output(ostream &os) const;
+-	virtual ostream &print(ostream &) const;
+-	friend istream& operator >> (istream &is, IppRangeOfIntegerAttribute &attr)
+-	{
+-		return attr.input(is);
+-	}
+-	friend ostream& operator << (ostream &os, const IppRangeOfIntegerAttribute &attr)
+-	{
+-		return attr.output(os);
+-	}
+-
+-	long lower;
+-	long upper;
+-};
+-
+-class IppContent {
+-public:
+-	IppContent();
+-	~IppContent();
+-	int length() const;
+-	istream &input(istream &);
+-	ostream &output(ostream &) const;
+-	friend istream& operator >> (istream &is, IppContent &ic)
+-	{
+-		return ic.input(is);
+-	}
+-	friend ostream& operator << (ostream &os, const IppContent &ic)
+-	{
+-		return ic.output(os);
+-	}
+-	void setVersion(uint16);
+-	uint16 getVersion() const;
+-	void setOperationId(IPP_OPERATION_ID);
+-	IPP_OPERATION_ID getOperationId() const;
+-	void setRequestId(uint32);
+-	uint32 getRequestId() const;
+-	IPP_STATUS_CODE getStatusCode() const;
+-	const char *getStatusMessage() const;
+-
+-	void setDelimiter(IPP_TAG tag);
+-	void setInteger(const char *name, int value);
+-	void setBoolean(const char *name, bool value);
+-	void setString(const char *name, const char *value);
+-	void setDateTime(const char *name, const DATETIME *dt);
+-	void setResolution(const char *name, int x, int y, IPP_RESOLUTION_UNITS u);
+-	void setRangeOfInteger(const char *name, int lower, int upper);
+-	void setTextWithLanguage(const char *name, const char *s1, const char *s2);
+-	void setNameWithLanguage(const char *name, const char *s1, const char *s2);
+-	void setTextWithoutLanguage(const char *name, const char *value);
+-	void setNameWithoutLanguage(const char *name, const char *value);
+-	void setKeyword(const char *name, const char *value);
+-	void setURI(const char *name, const char *value);
+-	void setURIScheme(const char *name, const char *value);
+-	void setCharset(const char *name, const char *value);
+-	void setNaturalLanguage(const char *name, const char *value);
+-	void setMimeMediaType(const char *name, const char *value);
+-
+-	void setRawData(const char *file, int size = -1);
+-	void setRawData(istream &is, int size = -1);
+-	ostream &print(ostream &) const;
+-
+-	bool operator !() const;
+-	bool good() const;
+-	bool fail() const;
+-
+-private:
+-	list<IppAttribute *> attrs;
+-	uint16 version;
+-	uint16 operation_id;
+-	uint32  request_id;
+-	string file_path;
+-	istream *is;
+-	int size;
+-};
+-
+-#endif	// __IppContent_H
+diff --git a/src/add-ons/print/transports/ipp/IppDefs.h b/src/add-ons/print/transports/ipp/IppDefs.h
+index 793db489..22df8ecd 100644
+--- a/src/add-ons/print/transports/ipp/IppDefs.h
++++ b/src/add-ons/print/transports/ipp/IppDefs.h
+@@ -7,5 +7,6 @@
+ #define SPOOL_PATH	"printer_file"
+ #define IPP_URL		"transport_address"
+ #define IPP_JOB_ID	"_ipp/job_id"
++#define IPP_DOCUMENT_FORMAT	"ipp:document-format"
+ 
+ #endif	//__IppDefs_H
+diff --git a/src/add-ons/print/transports/ipp/IppSetupDlg.cpp b/src/add-ons/print/transports/ipp/IppSetupDlg.cpp
+index 38a32a0f..de0ddd7e 100644
+--- a/src/add-ons/print/transports/ipp/IppSetupDlg.cpp
++++ b/src/add-ons/print/transports/ipp/IppSetupDlg.cpp
+@@ -12,8 +12,7 @@
+ #include <View.h>
+ #include <Url.h>
+ 
+-#include "IppContent.h"
+-#include "IppURLConnection.h"
++#include "IppClient.h"
+ #include "IppSetupDlg.h"
+ #include "IppDefs.h"
+ #include "DbgMsg.h"
+@@ -103,47 +102,31 @@ void IppSetupView::AttachedToWindow()
+ 
+ bool IppSetupView::UpdateViewData()
+ {
+-	string error_msg;
++	BString error_msg;
+ 
+ 	if (*url->Text()) {
+-		IppContent *request = new IppContent;
+-		request->setOperationId(IPP_GET_PRINTER_ATTRIBUTES);
+-		request->setDelimiter(IPP_OPERATION_ATTRIBUTES_TAG);
+-		request->setCharset("attributes-charset", "utf-8");
+-		request->setNaturalLanguage("attributes-natural-language", "en-us");
+-		request->setURI("printer-uri", url->Text());
+-		request->setDelimiter(IPP_END_OF_ATTRIBUTES_TAG);
+-
+-		IppURLConnection conn(BUrl(url->Text(), true));
+-		conn.setIppRequest(request);
+-		conn.setRequestProperty("Connection", "close");
+-
+-		HTTP_RESPONSECODE response_code = conn.getResponseCode();
+-		if (response_code == HTTP_OK) {
+-			const char *content_type = conn.getContentType();
+-			if (content_type == NULL
+-				|| strncasecmp(content_type, "application/ipp", 15) == 0) {
+-				const IppContent *ipp_response = conn.getIppResponse();
+-				if (ipp_response->good()) {
+-					dir->WriteAttr(IPP_URL, B_STRING_TYPE, 0, url->Text(),
+-						strlen(url->Text()) + 1);
+-					return true;
+-				} else {
+-					error_msg = ipp_response->getStatusMessage();
+-				}
+-			} else {
+-				error_msg = "cannot get a IPP response.";
+-			}
+-		} else if (response_code != HTTP_UNKNOWN) {
+-			error_msg = conn.getResponseMessage();
++		IppClient::Request request(IppClient::kGetPrinterAttributes,
++			url->Text());
++		request.AddString(IppClient::kKeyword, "requested-attributes",
++			"printer-state");
++
++		IppClient::Response response;
++		BString error;
++		if (IppClient::Send(url->Text(), request, NULL, response, error,
++				5000000LL) != B_OK) {
++			error_msg = error;
++		} else if (!response.Succeeded()) {
++			error_msg = response.StatusText();
+ 		} else {
+-			error_msg = "cannot connect to the IPP server.";
++			dir->WriteAttr(IPP_URL, B_STRING_TYPE, 0, url->Text(),
++				strlen(url->Text()) + 1);
++			return true;
+ 		}
+ 	} else {
+ 		error_msg = "please input the printer URL.";
+ 	}
+ 
+-	BAlert *alert = new BAlert("", error_msg.c_str(), "OK");
++	BAlert *alert = new BAlert("", error_msg.String(), "OK");
+ 	alert->SetFlags(alert->Flags() | B_CLOSE_ON_ESCAPE);
+ 	alert->Go();
+ 	return false;
+diff --git a/src/add-ons/print/transports/ipp/IppTransport.cpp b/src/add-ons/print/transports/ipp/IppTransport.cpp
+index 0bd3c5da..c1e245be 100644
+--- a/src/add-ons/print/transports/ipp/IppTransport.cpp
++++ b/src/add-ons/print/transports/ipp/IppTransport.cpp
+@@ -4,6 +4,7 @@
+ #include <Alert.h>
+ #include <DataIO.h>
+ #include <Directory.h>
++#include <File.h>
+ #include <Message.h>
+ #include <Url.h>
+ 
+@@ -13,8 +14,7 @@
+ #include <strings.h>
+ #include <unistd.h>
+ 
+-#include "IppContent.h"
+-#include "IppURLConnection.h"
++#include "IppClient.h"
+ #include "IppSetupDlg.h"
+ #include "IppTransport.h"
+ #include "IppDefs.h"
+@@ -32,6 +32,7 @@ IppTransport::IppTransport(BMessage *msg)
+ 	__url[0]  = '\0';
+ 	__user[0] = '\0';
+ 	__file[0] = '\0';
++	strcpy(__format, "application/octet-stream");
+ 	__jobid   = 0;
+ 	__error   = false;
+ 
+@@ -52,6 +53,22 @@ IppTransport::IppTransport(BMessage *msg)
+ 		}
+ 
+ 		dir.ReadAttr(IPP_URL,    B_STRING_TYPE, 0, __url,    sizeof(__url));
++
++		// Tell the printer what the driver produces, so that printers
++		// without format detection accept the job. An explicit
++		// "ipp:document-format" attribute on the printer wins.
++		char format[sizeof(__format)] = "";
++		char driver[B_FILE_NAME_LENGTH] = "";
++		if (dir.ReadAttr(IPP_DOCUMENT_FORMAT, B_STRING_TYPE, 0, format,
++				sizeof(format) - 1) > 0) {
++			strlcpy(__format, format, sizeof(__format));
++		} else if (dir.ReadAttr("Driver Name", B_STRING_TYPE, 0, driver,
++				sizeof(driver) - 1) > 0) {
++			if (strcmp(driver, "IPP Everywhere") == 0)
++				strcpy(__format, "image/pwg-raster");
++			else if (strcmp(driver, "PS Compatible") == 0)
++				strcpy(__format, "application/postscript");
++		}
+ 		dir.ReadAttr(IPP_JOB_ID, B_INT32_TYPE,  0, &__jobid, sizeof(__jobid));
+ 		__jobid++;
+ 		if (__jobid > 255) {
+@@ -81,48 +98,27 @@ IppTransport::~IppTransport()
+ 	string error_msg;
+ 
+ 	if (!__error && __fs.good()) {
+-		DBGMSG(("create IppContent\n"));
+-		IppContent *request = new IppContent;
+-		request->setOperationId(IPP_PRINT_JOB);
+-		request->setDelimiter(IPP_OPERATION_ATTRIBUTES_TAG);
+-		request->setCharset("attributes-charset", "utf-8");
+-		request->setNaturalLanguage("attributes-natural-language", "en-us");
+-		request->setURI("printer-uri", __url);
+-		request->setMimeMediaType("document-format", "application/octet-stream");
+-		request->setNameWithoutLanguage("requesting-user-name", __user);
+-//		request->setNameWithoutLanguage("job-name", __file);	// optional
+-		request->setDelimiter(IPP_END_OF_ATTRIBUTES_TAG);
+-
+-		long fssize = __fs.tellg();
+-		__fs.seekg(0, ios::beg);
+-		request->setRawData(__fs, fssize);
+-
+-		BUrl url(__url, true);
+-		IppURLConnection conn(url);
+-		conn.setIppRequest(request);
+-		conn.setRequestProperty("Connection", "close");
+-
+-		DBGMSG(("do connect\n"));
+-
+-		HTTP_RESPONSECODE response_code = conn.getResponseCode();
+-		if (response_code == HTTP_OK) {
+-			const char *content_type = conn.getContentType();
+-			if (content_type == NULL || strncasecmp(content_type, "application/ipp", 15) == 0) {
+-				const IppContent *ipp_response = conn.getIppResponse();
+-				if (ipp_response->fail()) {
+-					__error = true;
+-					error_msg = ipp_response->getStatusMessage();
+-				}
+-			} else {
+-				__error = true;
+-				error_msg = "cannot get a IPP response.";
+-			}
+-		} else if (response_code != HTTP_UNKNOWN) {
++		__fs.close();
++
++		IppClient::Request request(IppClient::kPrintJob, __url);
++		request.AddString(IppClient::kName, "requesting-user-name", __user);
++		request.AddString(IppClient::kName, "job-name", "Haiku");
++		request.AddString(IppClient::kMimeMediaType, "document-format",
++			__format);
++
++		BFile document(__file, B_READ_ONLY);
++		IppClient::Response response;
++		BString error;
++		if (document.InitCheck() != B_OK) {
++			__error = true;
++			error_msg = "cannot read the spool file.";
++		} else if (IppClient::Send(__url, request, &document, response,
++				error) != B_OK) {
+ 			__error = true;
+-			error_msg = conn.getResponseMessage();
+-		} else {
++			error_msg = error.String();
++		} else if (!response.Succeeded()) {
+ 			__error = true;
+-			error_msg = "cannot connect to the IPP server.";
++			error_msg = response.StatusText().String();
+ 		}
+ 	}
+ 
+diff --git a/src/add-ons/print/transports/ipp/IppTransport.h b/src/add-ons/print/transports/ipp/IppTransport.h
+index d324f65d..ebc21f6a 100644
+--- a/src/add-ons/print/transports/ipp/IppTransport.h
++++ b/src/add-ons/print/transports/ipp/IppTransport.h
+@@ -29,6 +29,7 @@ private:
+ 	char    __url[256];
+ 	char    __user[256];
+ 	char    __file[256];
++	char    __format[64];
+ 	int32   __jobid;
+ 	bool    __error;
+ 	fstream __fs;
+diff --git a/src/add-ons/print/transports/ipp/IppURLConnection.cpp b/src/add-ons/print/transports/ipp/IppURLConnection.cpp
+deleted file mode 100644
+index c6cfe3ed..00000000
+--- a/src/add-ons/print/transports/ipp/IppURLConnection.cpp
++++ /dev/null
+@@ -1,106 +0,0 @@
+-// Sun, 18 Jun 2000
+-// Y.Takagi
+-
+-#if defined(__HAIKU__) || defined(HAIKU_TARGET_PLATFORM_BONE)
+-#	include <sys/socket.h>
+-#else
+-#	include <net/socket.h>
+-#endif
+-#include <iostream>
+-#include <strings.h>
+-#include <stdio.h>
+-char *itoa(int i, char *buf, int unit)
+-{
+-	sprintf(buf, "%d", i);
+-	return buf;
+-}
+-#define stricmp		strcasecmp
+-#define strnicmp	strncasecmp
+-
+-#include <list>
+-#include "IppURLConnection.h"
+-#include "IppContent.h"
+-
+-IppURLConnection::IppURLConnection(const BUrl &Url)
+-	: HttpURLConnection(Url)
+-{
+-	__ippRequest  = NULL;
+-	__ippResponse = new IppContent;
+-	setRequestMethod("POST");
+-	setRequestProperty("Content-Type", "application/ipp");
+-	setRequestProperty("Cache-Control", "no-cache");
+-	setRequestProperty("Pragma", "no-cache");
+-}
+-
+-IppURLConnection::~IppURLConnection()
+-{
+-	if (__ippRequest) {
+-		delete __ippRequest;
+-	}
+-
+-	if (__ippResponse) {
+-		delete __ippResponse;
+-	}
+-}
+-
+-void IppURLConnection::setIppRequest(IppContent *obj)
+-{
+-	if (__ippRequest) {
+-		delete __ippRequest;
+-	}
+-	__ippRequest = obj;
+-}
+-
+-
+-const IppContent *IppURLConnection::getIppResponse() const
+-{
+-	return __ippResponse;
+-}
+-
+-void IppURLConnection::setRequest()
+-{
+-	if (connected) {
+-		char buf[64];
+-		itoa(__ippRequest->length(), buf, 10);
+-		setRequestProperty("Content-Length", buf);
+-		HttpURLConnection::setRequest();
+-	}
+-}
+-
+-void IppURLConnection::setContent()
+-{
+-	if (connected && __ippRequest) {
+-		ostream &os = getOutputStream();
+-		os << *__ippRequest;
+-	}
+-}
+-
+-inline bool is_contenttype_ipp(const char *s)
+-{
+-	return strnicmp(s, "application/ipp", 15) ? false : true;
+-}
+-
+-void IppURLConnection::getContent()
+-{
+-	if (connected) {
+-		if (getResponseCode() == HTTP_OK && is_contenttype_ipp(getContentType())) {
+-			istream &is = getInputStream();
+-			is >> *__ippResponse;
+-		} else {
+-			HttpURLConnection::getContent();
+-		}
+-	}
+-}
+-
+-ostream &IppURLConnection::printIppRequest(ostream &os)
+-{
+-	return __ippRequest->print(os);
+-}
+-
+-ostream &IppURLConnection::printIppResponse(ostream &os)
+-{
+-	if (getResponseCode() == HTTP_OK && is_contenttype_ipp(getContentType())) {
+-		return __ippResponse->print(os);
+-	}
+-	return os;
+-}
+diff --git a/src/add-ons/print/transports/ipp/IppURLConnection.h b/src/add-ons/print/transports/ipp/IppURLConnection.h
+deleted file mode 100644
+index 5a6fc418..00000000
+--- a/src/add-ons/print/transports/ipp/IppURLConnection.h
++++ /dev/null
+@@ -1,34 +0,0 @@
+-// Sun, 18 Jun 2000
+-// Y.Takagi
+-
+-#ifndef __IppURLConnection_H
+-#define __IppURLConnection_H
+-
+-#include "HttpURLConnection.h"
+-
+-class IppContent;
+-
+-class IppURLConnection : public HttpURLConnection {
+-public:
+-	IppURLConnection(const BUrl &url);
+-	~IppURLConnection();
+-
+-	void setIppRequest(IppContent *);
+-	const IppContent *getIppResponse() const;
+-
+-	int length();
+-
+-	ostream &printIppRequest(ostream &);
+-	ostream &printIppResponse(ostream &);
+-
+-protected:
+-	virtual void setRequest();
+-	virtual void setContent();
+-	virtual void getContent();
+-
+-private:
+-	IppContent *__ippRequest;
+-	IppContent *__ippResponse;
+-};
+-
+-#endif	// __IppURLConnection_H
+diff --git a/src/add-ons/print/transports/ipp/Jamfile b/src/add-ons/print/transports/ipp/Jamfile
+index d7ea3343..0bec3a6c 100644
+--- a/src/add-ons/print/transports/ipp/Jamfile
++++ b/src/add-ons/print/transports/ipp/Jamfile
+@@ -10,17 +10,12 @@ Addon IPP :
+ 	Ipp.cpp
+ 	IppSetupDlg.cpp
+ 	IppTransport.cpp
+-	HttpURLConnection.cpp
+-	IppContent.cpp
+-	IppURLConnection.cpp
+-	Socket.o
+-	SocketStream.o
++	IppClient.o
+ 	DbgMsg.o
+ 	: shared be $(TARGET_NETAPI_LIB) $(TARGET_NETWORK_LIBS) [ TargetLibstdc++ ]
+ ;
+ 
+ ObjectReferences
+-	<src!add-ons!print!transports!shared>Socket.o
+-	<src!add-ons!print!transports!shared>SocketStream.o
++	<src!add-ons!print!transports!shared>IppClient.o
+ 	<src!add-ons!print!transports!shared>DbgMsg.o
+ ;
+diff --git a/src/add-ons/print/transports/shared/IppClient.cpp b/src/add-ons/print/transports/shared/IppClient.cpp
+new file mode 100644
+index 00000000..cac1bdc1
+--- /dev/null
++++ b/src/add-ons/print/transports/shared/IppClient.cpp
+@@ -0,0 +1,506 @@
++/*
++ * Copyright 2026 Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++
++
++#include "IppClient.h"
++
++#include <ctype.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++
++#include <NetworkAddress.h>
++#include <SecureSocket.h>
++#include <Socket.h>
++
++
++namespace IppClient {
++
++
++namespace {
++
++
++// Printers on the local network present self-signed certificates.
++class TrustingSecureSocket : public BSecureSocket {
++public:
++	virtual bool CertificateVerificationFailed(BCertificate&, const char*)
++	{
++		return true;
++	}
++};
++
++
++struct Location {
++	bool		tls;
++	BString		host;
++	uint16		port;
++	BString		path;
++};
++
++
++bool
++parse_uri(const char* uri, Location& location)
++{
++	const char* separator = strstr(uri, "://");
++	if (separator == NULL)
++		return false;
++
++	BString scheme(uri, separator - uri);
++	scheme.ToLower();
++	if (scheme == "ipp" || scheme == "http") {
++		location.tls = false;
++		location.port = scheme == "ipp" ? 631 : 80;
++	} else if (scheme == "ipps" || scheme == "https") {
++		location.tls = true;
++		location.port = scheme == "ipps" ? 631 : 443;
++	} else
++		return false;
++
++	const char* host = separator + 3;
++	const char* path = strchr(host, '/');
++	BString authority = path != NULL ? BString(host, path - host)
++		: BString(host);
++	location.path = path != NULL ? path : "/";
++
++	int32 colon = authority.FindLast(':');
++	if (colon >= 0 && authority.FindLast(']') < colon) {
++		location.port = atoi(authority.String() + colon + 1);
++		authority.Truncate(colon);
++	}
++	authority.RemoveAll("[");
++	authority.RemoveAll("]");
++	location.host = authority;
++	return location.host.Length() > 0 && location.port != 0;
++}
++
++
++uint32
++read_be(const std::string& data, size_t offset, size_t bytes)
++{
++	uint32 value = 0;
++	for (size_t i = 0; i < bytes; i++)
++		value = (value << 8) | (uint8)data[offset + i];
++	return value;
++}
++
++
++// Returns true once 'raw' holds a complete HTTP response.
++bool
++response_complete(const std::string& raw)
++{
++	size_t start = 0;
++	while (true) {
++		size_t end = raw.find("\r\n\r\n", start);
++		if (end == std::string::npos)
++			return false;
++		// skip informational "100 Continue" responses
++		if (raw.compare(start, 12, "HTTP/1.1 100") == 0
++			|| raw.compare(start, 12, "HTTP/1.0 100") == 0) {
++			start = end + 4;
++			continue;
++		}
++
++		BString headers(raw.data() + start, end - start);
++		headers.ToLower();
++		size_t bodyStart = end + 4;
++		int32 index = headers.FindFirst("\r\ncontent-length:");
++		if (index >= 0) {
++			size_t length = strtoul(headers.String() + index + 17, NULL, 10);
++			return raw.size() >= bodyStart + length;
++		}
++		if (headers.FindFirst("\r\ntransfer-encoding: chunked") >= 0)
++			return raw.find("\r\n0\r\n", bodyStart - 2) != std::string::npos;
++		// read until the server closes the connection
++		return false;
++	}
++}
++
++
++status_t
++split_response(const std::string& raw, int32& code, BString& statusLine,
++	std::string& body)
++{
++	size_t start = 0;
++	while (true) {
++		size_t lineEnd = raw.find("\r\n", start);
++		size_t end = raw.find("\r\n\r\n", start);
++		if (lineEnd == std::string::npos || end == std::string::npos)
++			return B_BAD_DATA;
++
++		statusLine.SetTo(raw.data() + start, lineEnd - start);
++		const char* space = strchr(statusLine.String(), ' ');
++		code = space != NULL ? atoi(space + 1) : 0;
++		if (code == 100) {
++			start = end + 4;
++			continue;
++		}
++
++		BString headers(raw.data() + start, end - start);
++		headers.ToLower();
++		size_t bodyStart = end + 4;
++
++		if (headers.FindFirst("\r\ntransfer-encoding: chunked") >= 0) {
++			body.clear();
++			size_t position = bodyStart;
++			while (position < raw.size()) {
++				size_t sizeEnd = raw.find("\r\n", position);
++				if (sizeEnd == std::string::npos)
++					return B_BAD_DATA;
++				size_t chunk = strtoul(raw.c_str() + position, NULL, 16);
++				if (chunk == 0)
++					break;
++				if (sizeEnd + 2 + chunk > raw.size())
++					return B_BAD_DATA;
++				body.append(raw, sizeEnd + 2, chunk);
++				position = sizeEnd + 2 + chunk + 2;
++			}
++			return B_OK;
++		}
++
++		int32 index = headers.FindFirst("\r\ncontent-length:");
++		if (index >= 0) {
++			size_t length = strtoul(headers.String() + index + 17, NULL, 10);
++			body.assign(raw, bodyStart, length);
++		} else
++			body.assign(raw, bodyStart, std::string::npos);
++		return B_OK;
++	}
++}
++
++
++status_t
++exchange(const Location& location, const std::string& ipp,
++	BPositionIO* document, off_t documentSize, std::string& raw,
++	BString& error, bigtime_t timeout)
++{
++	BNetworkAddress address;
++	status_t status = address.SetTo(location.host, location.port);
++	if (status != B_OK) {
++		error.SetToFormat("Cannot resolve the printer address %s.",
++			location.host.String());
++		return status;
++	}
++
++	BSocket* socket = location.tls
++		? new(std::nothrow) TrustingSecureSocket : new(std::nothrow) BSocket;
++	if (socket == NULL)
++		return B_NO_MEMORY;
++
++	status = socket->Connect(address, timeout);
++	if (status != B_OK) {
++		error.SetToFormat("Cannot connect to the printer at %s:%u: %s.",
++			location.host.String(), location.port, strerror(status));
++		delete socket;
++		return status;
++	}
++	socket->SetTimeout(timeout);
++
++	BString header;
++	header.SetToFormat("POST %s HTTP/1.1\r\n"
++		"Host: %s:%u\r\n"
++		"Content-Type: application/ipp\r\n"
++		"Content-Length: %" B_PRIdOFF "\r\n"
++		"Connection: close\r\n"
++		"\r\n", location.path.String(), location.host.String(),
++		location.port, (off_t)ipp.size() + documentSize);
++
++	status = socket->WriteExactly(header.String(), header.Length());
++	if (status == B_OK)
++		status = socket->WriteExactly(ipp.data(), ipp.size());
++
++	if (status == B_OK && document != NULL && documentSize > 0) {
++		const size_t kBufferSize = 64 * 1024;
++		char* buffer = (char*)malloc(kBufferSize);
++		if (buffer == NULL)
++			status = B_NO_MEMORY;
++		off_t position = 0;
++		while (status == B_OK && position < documentSize) {
++			ssize_t bytes = document->ReadAt(position, buffer, kBufferSize);
++			if (bytes <= 0) {
++				status = bytes < 0 ? (status_t)bytes : B_IO_ERROR;
++				break;
++			}
++			status = socket->WriteExactly(buffer, bytes);
++			position += bytes;
++		}
++		free(buffer);
++	}
++
++	// A printer may answer (and close) before it has read the whole
++	// request, e.g. "426 Upgrade Required": still read what it sent.
++	status_t writeStatus = status;
++
++	raw.clear();
++	char buffer[16 * 1024];
++	while (raw.size() < 16 * 1024 * 1024) {
++		ssize_t bytes = socket->Read(buffer, sizeof(buffer));
++		if (bytes <= 0)
++			break;
++		raw.append(buffer, bytes);
++		if (response_complete(raw))
++			break;
++	}
++	delete socket;
++
++	if (raw.empty()) {
++		if (writeStatus != B_OK) {
++			error.SetToFormat("Sending to the printer failed: %s.",
++				strerror(writeStatus));
++			return writeStatus;
++		}
++		error = "The printer closed the connection without an answer.";
++		return B_IO_ERROR;
++	}
++	return B_OK;
++}
++
++
++}	// namespace
++
++
++// #pragma mark - Request
++
++
++Request::Request(uint16 operation, const char* printerUri)
++	:
++	fFinished(false)
++{
++	static int32 sRequestID = 0;
++	int32 requestID = atomic_add(&sRequestID, 1) + 1;
++
++	const uint8 header[] = {
++		1, 1,	// IPP/1.1
++		(uint8)(operation >> 8), (uint8)operation,
++		(uint8)(requestID >> 24), (uint8)(requestID >> 16),
++		(uint8)(requestID >> 8), (uint8)requestID
++	};
++	fData.assign((const char*)header, sizeof(header));
++
++	BeginGroup(kOperationGroup);
++	AddString(kCharset, "attributes-charset", "utf-8");
++	AddString(kLanguage, "attributes-natural-language", "en");
++	AddString(kUri, "printer-uri", printerUri);
++}
++
++
++void
++Request::BeginGroup(uint8 tag)
++{
++	fData += (char)tag;
++}
++
++
++void
++Request::AddString(uint8 tag, const char* name, const char* value)
++{
++	_Add(tag, name, value, strlen(value));
++}
++
++
++void
++Request::AddValue(uint8 tag, const char* value)
++{
++	_Add(tag, "", value, strlen(value));
++}
++
++
++void
++Request::AddInteger(uint8 tag, const char* name, int32 value)
++{
++	const uint8 bytes[] = { (uint8)(value >> 24), (uint8)(value >> 16),
++		(uint8)(value >> 8), (uint8)value };
++	_Add(tag, name, bytes, sizeof(bytes));
++}
++
++
++const std::string&
++Request::Data()
++{
++	if (!fFinished) {
++		fData += (char)kEndOfAttributes;
++		fFinished = true;
++	}
++	return fData;
++}
++
++
++void
++Request::_Add(uint8 tag, const char* name, const void* value, size_t length)
++{
++	size_t nameLength = strlen(name);
++	fData += (char)tag;
++	fData += (char)(nameLength >> 8);
++	fData += (char)nameLength;
++	fData.append(name, nameLength);
++	fData += (char)(length >> 8);
++	fData += (char)length;
++	fData.append((const char*)value, length);
++}
++
++
++// #pragma mark - Attribute, Response
++
++
++int32
++Attribute::ResolutionAt(size_t index) const
++{
++	if (tag != kResolution || index >= values.size()
++		|| values[index].size() != 9) {
++		return 0;
++	}
++	int32 x = (int32)read_be(values[index], 0, 4);
++	uint8 units = (uint8)values[index][8];
++	if (units == 4)
++		return (int32)(x * 2.54 + 0.5);
++			// dots per centimeter
++	return x;
++}
++
++
++bool
++Attribute::BooleanAt(size_t index) const
++{
++	return index < values.size() && values[index].size() == 1
++		&& values[index][0] != 0;
++}
++
++
++int32
++Attribute::IntegerAt(size_t index) const
++{
++	if (index >= values.size() || values[index].size() != 4)
++		return 0;
++	return (int32)read_be(values[index], 0, 4);
++}
++
++
++const Attribute*
++Response::Find(const char* name) const
++{
++	for (size_t i = 0; i < attributes.size(); i++) {
++		if (attributes[i].name == name)
++			return &attributes[i];
++	}
++	return NULL;
++}
++
++
++BString
++Response::StatusText() const
++{
++	BString text;
++	const Attribute* message = Find("status-message");
++	if (message != NULL && !message->values.empty())
++		text = message->values[0].c_str();
++	else
++		text.SetToFormat("The printer answered with IPP status 0x%04x.",
++			status);
++	return text;
++}
++
++
++// #pragma mark - Send
++
++
++static status_t
++decode(const std::string& body, Response& response, BString& error)
++{
++	response.attributes.clear();
++	if (body.size() < 8) {
++		error = "The printer sent a truncated IPP response.";
++		return B_BAD_DATA;
++	}
++	response.status = (uint16)read_be(body, 2, 2);
++
++	uint8 group = 0;
++	size_t position = 8;
++	while (position < body.size()) {
++		uint8 tag = (uint8)body[position++];
++		if (tag == kEndOfAttributes)
++			break;
++		if (tag <= 0x0f) {
++			group = tag;
++			continue;
++		}
++		if (position + 2 > body.size())
++			break;
++		size_t nameLength = read_be(body, position, 2);
++		position += 2;
++		if (position + nameLength + 2 > body.size())
++			break;
++		std::string name(body, position, nameLength);
++		position += nameLength;
++		size_t valueLength = read_be(body, position, 2);
++		position += 2;
++		if (position + valueLength > body.size())
++			break;
++		std::string value(body, position, valueLength);
++		position += valueLength;
++
++		if (nameLength == 0 && !response.attributes.empty()) {
++			response.attributes.back().values.push_back(value);
++			continue;
++		}
++		Attribute attribute;
++		attribute.group = group;
++		attribute.tag = tag;
++		attribute.name = name;
++		attribute.values.push_back(value);
++		response.attributes.push_back(attribute);
++	}
++	return B_OK;
++}
++
++
++status_t
++Send(const char* uri, Request& request, BPositionIO* document,
++	Response& response, BString& error, bigtime_t timeout)
++{
++	Location location;
++	if (uri == NULL || !parse_uri(uri, location)) {
++		error.SetToFormat("\"%s\" is not an ipp:// or ipps:// printer URI.",
++			uri != NULL ? uri : "");
++		return B_BAD_VALUE;
++	}
++
++	off_t documentSize = 0;
++	if (document != NULL && document->GetSize(&documentSize) != B_OK)
++		documentSize = 0;
++
++	const std::string& ipp = request.Data();
++	for (int attempt = 0; attempt < 2; attempt++) {
++		std::string raw;
++		status_t status = exchange(location, ipp, document, documentSize, raw,
++			error, timeout);
++		if (status != B_OK)
++			return status;
++
++		int32 code;
++		BString statusLine;
++		std::string body;
++		if (split_response(raw, code, statusLine, body) != B_OK) {
++			error = "The printer sent a malformed HTTP response.";
++			return B_BAD_DATA;
++		}
++		if (code == 426 && !location.tls) {
++			// "Upgrade Required": the printer only talks IPP over TLS
++			location.tls = true;
++			continue;
++		}
++		if (code != 200) {
++			error.SetToFormat("The printer answered \"%s\".",
++				statusLine.String());
++			return B_ERROR;
++		}
++		return decode(body, response, error);
++	}
++
++	error = "The printer requires TLS but the TLS connection failed.";
++	return B_ERROR;
++}
++
++
++}	// namespace IppClient
+diff --git a/src/add-ons/print/transports/shared/IppClient.h b/src/add-ons/print/transports/shared/IppClient.h
+new file mode 100644
+index 00000000..deb5deb6
+--- /dev/null
++++ b/src/add-ons/print/transports/shared/IppClient.h
+@@ -0,0 +1,107 @@
++/*
++ * Copyright 2026 Haiku, Inc. All rights reserved.
++ * Distributed under the terms of the MIT License.
++ */
++#ifndef IPP_CLIENT_H
++#define IPP_CLIENT_H
++
++
++#include <DataIO.h>
++#include <String.h>
++
++#include <string>
++#include <vector>
++
++
++// A small IPP/1.1 client: encodes requests, sends them over HTTP to
++// ipp:// (plain, upgraded to TLS when the printer answers 426) or ipps://
++// (TLS) printer URIs, and decodes the response. Printers use self-signed
++// certificates, so certificate errors are ignored.
++namespace IppClient {
++
++
++enum {
++	kPrintJob				= 0x0002,
++	kValidateJob			= 0x0004,
++	kGetPrinterAttributes	= 0x000b
++};
++
++enum {
++	kOperationGroup			= 0x01,
++	kJobGroup				= 0x02,
++	kEndOfAttributes		= 0x03,
++	kPrinterGroup			= 0x04
++};
++
++enum {
++	kInteger				= 0x21,
++	kBoolean				= 0x22,
++	kEnum					= 0x23,
++	kResolution				= 0x32,
++	kText					= 0x41,
++	kName					= 0x42,
++	kKeyword				= 0x44,
++	kUri					= 0x45,
++	kCharset				= 0x47,
++	kLanguage				= 0x48,
++	kMimeMediaType			= 0x49
++};
++
++
++class Request {
++public:
++							Request(uint16 operation, const char* printerUri);
++
++			void			AddString(uint8 tag, const char* name,
++								const char* value);
++				// a further value of the attribute added last
++			void			AddValue(uint8 tag, const char* value);
++			void			AddInteger(uint8 tag, const char* name,
++								int32 value);
++			void			BeginGroup(uint8 tag);
++
++			const std::string& Data();
++
++private:
++			void			_Add(uint8 tag, const char* name,
++								const void* value, size_t length);
++
++			std::string		fData;
++			bool			fFinished;
++};
++
++
++struct Attribute {
++	uint8					group;
++	uint8					tag;
++	std::string				name;
++	std::vector<std::string> values;
++
++			// for kResolution values: dots per inch (0 if not a resolution)
++			int32			ResolutionAt(size_t index) const;
++			bool			BooleanAt(size_t index) const;
++			int32			IntegerAt(size_t index) const;
++};
++
++
++struct Response {
++	uint16					status;
++	std::vector<Attribute>	attributes;
++
++			const Attribute* Find(const char* name) const;
++			bool			Succeeded() const { return status < 0x0100; }
++			BString			StatusText() const;
++};
++
++
++// Sends an IPP request and decodes the response. 'document' (may be NULL)
++// is appended after the encoded request, as Print-Job needs.
++status_t	Send(const char* uri, Request& request, BPositionIO* document,
++				Response& response, BString& error,
++				bigtime_t timeout = 15000000LL);
++
++
++}	// namespace IppClient
++
++
++#endif	// IPP_CLIENT_H
+diff --git a/src/add-ons/print/transports/shared/Jamfile b/src/add-ons/print/transports/shared/Jamfile
+index c2519d53..0a9e6f35 100644
+--- a/src/add-ons/print/transports/shared/Jamfile
++++ b/src/add-ons/print/transports/shared/Jamfile
+@@ -2,6 +2,7 @@ SubDir HAIKU_TOP src add-ons print transports shared ;
+ 
+ Objects
+ 	DbgMsg.cpp
++	IppClient.cpp
+ 	Socket.cpp
+ 	SocketStream.cpp
+ ;
+-- 
+2.39.5
+
