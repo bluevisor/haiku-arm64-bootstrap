@@ -20,6 +20,10 @@ backend, SPICE display), the way spice-vdagent does it for Linux guests.
 
 UTM caches VM configs in memory, so a `plutil` edit of `config.plist` only takes effect after UTM restarts. To change settings live (VM stopped), use AppleScript: `configuration of vm` → `qemu additional arguments` → `update configuration`. AppleScript can't set clipboard sharing.
 
+## x86_64 / GNOME Boxes (libvirt)
+
+The same tools build and run on Haiku x86_64 r1beta6 (`HREV=r1beta6 WORK=…/haiku-src-r1beta6 guest-tools/build.sh <host>`). Boxes already adds the `com.redhat.spice.0` channel on a transitional virtio-serial device, which works on x86_64. Add `<mouse mode='server'/>` to the domain's `<graphics type='spice'>` (libvirt's form of `agent-mouse=off`) and restart QEMU. With Boxes' plain VGA there is no virtio-gpu, so clipboard works but resize-to-window fails (`resize to WxH: Invalid Argument`).
+
 ## Build and install
 
 ```sh
@@ -50,4 +54,5 @@ The virtio device node has no `B_FIND_CHILD_ON_DEMAND`. Its PCI parent does, and
 - Link kernel add-ons with `-z max-page-size=0x1000`. With ld's arm64 default (64 KiB) the kernel loader says "Bad data".
 - Don't use `-mgeneral-regs-only`: `supports_device()` returns a float.
 - The device manager calls `uninit_driver` right after registration unless the node has `B_KEEP_DRIVER_LOADED`. Hardware state set up in `register_child_devices` would otherwise be torn down.
+- Always pass a feature-name callback to `negotiate_features`. Haiku r1beta6's virtio bus calls it with no NULL check: a NULL callback is a kernel panic (`SMEP violation user-mapped address 0x0`, `VirtioDevice::NegotiateFeatures + 0x66`) as soon as vdagent opens the attach driver. Recovery: boot menu → safe mode options → "Disable user add-ons".
 - Only 8 virtqueues per virtio device (`VIRTIO_VIRTQUEUES_MAX_COUNT`), so serial ports 0–2 only. UTM puts the guest agent on port 1 and vdagent on port 2.
